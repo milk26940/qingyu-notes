@@ -1,7 +1,8 @@
+@import "@fontsource-variable/inter";
 @import "tailwindcss";
 
 :root {
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: "Inter Variable", Inter, ui-sans-serif, system-ui, sans-serif;
   color: #1f2937;
   background: #f8fafc;
   font-synthesis: none;
@@ -13,10 +14,22 @@
   --qy-faint: #98a2b3;
   --qy-border: #e4e7ec;
   --qy-accent: #2563eb;
+  --qy-font-scale: 1;
 }
 
 * { box-sizing: border-box; }
-body { margin: 0; min-width: 320px; min-height: 100vh; }
+body { margin: 0; min-width: 320px; min-height: 100vh; font-size: calc(16px * var(--qy-font-scale)); }
+.text-\[10px\] { font-size: calc(10px * var(--qy-font-scale)); }
+.text-\[11px\] { font-size: calc(11px * var(--qy-font-scale)); }
+.text-\[12px\] { font-size: calc(12px * var(--qy-font-scale)); }
+.text-\[13px\] { font-size: calc(13px * var(--qy-font-scale)); }
+.text-\[14px\] { font-size: calc(14px * var(--qy-font-scale)); }
+.text-\[15px\] { font-size: calc(15px * var(--qy-font-scale)); }
+.text-xs { font-size: calc(12px * var(--qy-font-scale)); }
+.text-sm { font-size: calc(14px * var(--qy-font-scale)); }
+.text-base { font-size: calc(16px * var(--qy-font-scale)); }
+.text-lg { font-size: calc(18px * var(--qy-font-scale)); }
+.text-xl { font-size: calc(20px * var(--qy-font-scale)); }
 .icon-button { display: inline-flex; height: 28px; width: 28px; align-items: center; justify-content: center; border-radius: 5px; color: var(--qy-muted); }
 .icon-button:hover { background: #f2f4f7; color: var(--qy-ink); }
 .icon-button:focus-visible { outline: 2px solid var(--qy-accent); outline-offset: 1px; }

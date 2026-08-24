@@ -5,8 +5,8 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 
 export const editorTheme = EditorView.theme({
-  "&": { height: "100%", fontSize: "15px", color: "var(--qy-ink)" },
-  ".cm-scroller": { fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", overflow: "auto" },
+  "&": { height: "100%", fontSize: "calc(15px * var(--qy-font-scale))", color: "var(--qy-ink)" },
+  ".cm-scroller": { fontFamily: '"Inter Variable", Inter, ui-sans-serif, system-ui, sans-serif', overflow: "auto" },
   ".cm-content": { padding: "28px 32px", minHeight: "100%" },
   ".cm-gutters": { display: "none" },
   ".cm-focused": { outline: "none" },

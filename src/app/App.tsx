@@ -7,10 +7,26 @@ import { usePagesStore } from "../stores/pagesStore";
 import { DatabaseTable } from "../components/database/DatabaseTable";
 import { subscribeVaultChanges } from "../lib/tauri/pages";
 import { useDatabaseStore } from "../stores/databaseStore";
+import { useAppearanceStore } from "../stores/appearanceStore";
 
 function App() {
   const { activePage, init, edit, editTitle, searchQuery, searchResults, open } = usePagesStore();
+  const applyFontScale = useAppearanceStore((state) => state.applyFontScale);
   useEffect(() => { void init(); }, [init]);
+  useEffect(() => {
+    applyFontScale();
+    const handleFontShortcut = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.altKey || event.isComposing) return;
+      const appearance = useAppearanceStore.getState();
+      if (event.key === "+" || event.key === "=") appearance.increaseFont();
+      else if (event.key === "-") appearance.decreaseFont();
+      else if (event.key === "0") appearance.resetFont();
+      else return;
+      event.preventDefault();
+    };
+    window.addEventListener("keydown", handleFontShortcut);
+    return () => window.removeEventListener("keydown", handleFontShortcut);
+  }, [applyFontScale]);
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
