@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownEditor } from "./MarkdownEditor";
 
 const storePageAsset = vi.hoisted(() => vi.fn());
-vi.mock("../../lib/tauri/pages", () => ({ storePageAsset }));
+const readPageAsset = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/tauri/pages", () => ({ storePageAsset, readPageAsset }));
 const openPage = vi.fn();
 const writeText = vi.fn();
 
@@ -16,6 +17,11 @@ function Harness() {
 function LinkHarness() {
   const [value, setValue] = useState("[项目规划](qingyu://page/page-2#block-2)");
   return <MarkdownEditor value={value} onChange={setValue} onOpenPage={openPage} pages={[{ id: "page-2", title: "项目规划", parentId: null, kind: "page", sortOrder: 0, trashedAt: null, path: "项目规划.md" }]} />;
+}
+
+function DecorationHarness() {
+  const [value, setValue] = useState("# 标题\n\n**加粗** 和 *强调*\n\n- 列表\n\n> 引用\n\n`代码`\n\n![示例](/.noteapp/assets/page-1/image.png)");
+  return <MarkdownEditor pageId="page-1" value={value} onChange={setValue} />;
 }
 
 describe("MarkdownEditor", () => {
@@ -59,6 +65,21 @@ describe("MarkdownEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "复制当前区块链接" }));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/^qingyu:\/\/page\/page-1#[0-9a-f-]{36}$/)));
+    unmount();
+  });
+
+  it("renders Notion-style semantic decorations and an inline image", async () => {
+    readPageAsset.mockResolvedValue({ mime: "image/png", bytes: [137, 80, 78, 71] });
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:image") });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
+    const { container, unmount } = render(<DecorationHarness />);
+
+    expect(container.querySelector(".qy-heading-1")).toBeInTheDocument();
+    expect(container.querySelector(".qy-strong")).toBeInTheDocument();
+    expect(container.querySelector(".qy-list-item")).toBeInTheDocument();
+    expect(container.querySelector(".qy-blockquote")).toBeInTheDocument();
+    expect(container.querySelector(".qy-inline-code")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("img", { name: "示例" })).toHaveAttribute("src", "blob:image"));
     unmount();
   });
 });

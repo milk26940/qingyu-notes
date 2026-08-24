@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use serde::Serialize;
 use tauri::State;
 use tokio::sync::Mutex;
 
@@ -10,6 +11,13 @@ use crate::pages::repository::PageRepository;
 #[derive(Default)]
 pub struct PageState {
     pub repository: Mutex<Option<PageRepository>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageAssetData {
+    mime: String,
+    bytes: Vec<u8>,
 }
 
 #[tauri::command]
@@ -81,6 +89,15 @@ pub async fn page_store_asset(
     repo(&state)
         .await?
         .store_asset(&page_id, &original_name, &bytes)
+}
+
+#[tauri::command]
+pub async fn page_read_asset(
+    state: State<'_, PageState>,
+    relative_path: String,
+) -> Result<PageAssetData, AppError> {
+    let (mime, bytes) = repo(&state).await?.read_asset(&relative_path)?;
+    Ok(PageAssetData { mime, bytes })
 }
 
 #[tauri::command]

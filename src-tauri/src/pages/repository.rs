@@ -227,6 +227,48 @@ impl PageRepository {
         Ok(format!("/.noteapp/assets/{page_id}/{file_name}"))
     }
 
+    pub fn read_asset(&self, relative_path: &str) -> Result<(String, Vec<u8>), AppError> {
+        if relative_path.contains('\\') {
+            return Err(AppError::new("asset_invalid_path", "附件路径不安全"));
+        }
+        let parts = relative_path
+            .trim_start_matches('/')
+            .split('/')
+            .collect::<Vec<_>>();
+        if parts.len() != 4 || parts[0] != ".noteapp" || parts[1] != "assets" {
+            return Err(AppError::new("asset_invalid_path", "附件路径不安全"));
+        }
+        let page_id = parts[2];
+        let file = Path::new(parts[3]);
+        let stem = file
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| AppError::new("asset_invalid_path", "附件路径不安全"))?;
+        Uuid::parse_str(stem).map_err(|_| AppError::new("asset_invalid_path", "附件路径不安全"))?;
+        let _ = self.get(page_id, false)?;
+        let bytes = fs::read(
+            self.root
+                .join(".noteapp")
+                .join("assets")
+                .join(page_id)
+                .join(parts[3]),
+        )
+        .map_err(|error| AppError::new("asset_not_found", error.to_string()))?;
+        if bytes.len() > 20 * 1024 * 1024 {
+            return Err(AppError::new("asset_too_large", "图片不能超过 20 MiB"));
+        }
+        let extension = image_extension(&bytes)
+            .ok_or_else(|| AppError::new("asset_invalid_type", "附件不是支持的图片"))?;
+        let mime = match extension {
+            "png" => "image/png",
+            "jpg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => unreachable!(),
+        };
+        Ok((mime.to_owned(), bytes))
+    }
+
     pub fn move_page(
         &self,
         id: &str,
@@ -792,6 +834,15 @@ mod tests {
         assert_eq!(
             fs::read(root.join(relative.trim_start_matches('/'))).unwrap(),
             png
+        );
+        let (mime, loaded) = repo.read_asset(&relative).unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(loaded, png);
+        assert_eq!(
+            repo.read_asset("/.noteapp/assets/../vault.json")
+                .unwrap_err()
+                .code,
+            "asset_invalid_path"
         );
 
         assert_eq!(
