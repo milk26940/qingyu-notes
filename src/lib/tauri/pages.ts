@@ -7,7 +7,7 @@ export type PageSummary = Pick<Page, "id" | "title" | "parentId" | "kind" | "sor
 export type PageLink = { sourceId: string; targetId: string | null; label: string };
 export type PageHistoryEntry = { id: string; pageId: string; action: string; timestamp: string; title: string; content: string };
 export type SearchResult = { page: PageSummary; snippet: string };
-export type VaultChange = { source: "agent"; namespace: string; tool: string; pageIds: string[]; databaseIds: string[] };
+export type VaultChange = { source: "agent" | "restore" | "import"; namespace: string; tool: string; pageIds: string[]; databaseIds: string[] };
 
 export const initVault = (path?: string) => invoke<string>("vault_init", { path: path ?? null });
 export const listPages = (includeTrash = false) => invoke<PageSummary[]>("page_list", { includeTrash });

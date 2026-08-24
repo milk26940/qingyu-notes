@@ -20,6 +20,8 @@ use super::protocol::{
     rpc_notification, rpc_request, rpc_response, CodexEvent, CodexInitializeResult,
     CodexServerRequest, RpcMessage,
 };
+use crate::backup::model::BackupScope;
+use crate::backup::repository::BackupRepository;
 use crate::database::model::{DatabaseFieldType, DatabaseQuery};
 use crate::database::repository::DatabaseRepository;
 use crate::error::AppError;
@@ -355,8 +357,25 @@ impl CodexRuntime {
         }
         let stdin = self.stdin().await?;
         let result = if approved {
-            self.execute_tool(&approval.namespace, &approval.tool, &approval.arguments)
+            let pages = self
+                .pages
+                .read()
                 .await
+                .clone()
+                .ok_or_else(|| AppError::new("vault_not_initialized", "笔记库尚未初始化"));
+            match pages.and_then(|pages| {
+                BackupRepository::open(pages.root())?
+                    .checkpoint(BackupScope::Vault, "agentDangerousWrite")
+            }) {
+                Ok(_) => {
+                    self.execute_tool(&approval.namespace, &approval.tool, &approval.arguments)
+                        .await
+                }
+                Err(error) => Err(AppError::new(
+                    "agent_backup_failed",
+                    format!("危险操作已阻止：备份失败：{}", error.message),
+                )),
+            }
         } else {
             Err(AppError::new("tool_rejected", "用户拒绝了此操作"))
         };

@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod codex;
 pub mod conversations;
 pub mod database;

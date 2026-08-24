@@ -1,3 +1,4 @@
+mod backup;
 mod codex;
 mod commands;
 mod database;
@@ -20,6 +21,11 @@ pub fn run() {
         .manage(pages)
         .invoke_handler(tauri::generate_handler![
             greet,
+            commands::backup::backup_checkpoint,
+            commands::backup::backup_list,
+            commands::backup::backup_restore,
+            commands::backup::backup_export_zip,
+            commands::backup::backup_import_zip,
             commands::codex::codex_status,
             commands::codex::codex_start,
             commands::codex::codex_stop,

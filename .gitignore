@@ -19,6 +19,9 @@ dist-ssr/
 # Rust/Tauri build output
 src-tauri/target/
 src-tauri/gen/
+src-tauri/icons/64x64.png
+src-tauri/icons/android/
+src-tauri/icons/ios/
 
 # Editor directories and files
 .vscode/*
