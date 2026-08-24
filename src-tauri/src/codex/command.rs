@@ -11,13 +11,24 @@ pub struct CodexLaunch {
 
 impl CodexLaunch {
     pub fn from_path(path: PathBuf) -> Self {
-        if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("cmd")) {
+        if path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
+        {
             return Self {
                 program: PathBuf::from("cmd.exe"),
-                prefix_args: vec!["/D".into(), "/S".into(), "/C".into(), path.to_string_lossy().into()],
+                prefix_args: vec![
+                    "/D".into(),
+                    "/S".into(),
+                    "/C".into(),
+                    path.to_string_lossy().into(),
+                ],
             };
         }
-        Self { program: path, prefix_args: Vec::new() }
+        Self {
+            program: path,
+            prefix_args: Vec::new(),
+        }
     }
 }
 
@@ -40,7 +51,10 @@ pub fn resolve_codex_launch() -> Result<CodexLaunch, AppError> {
             }
         }
     }
-    Err(AppError::new("codex_not_found", "未找到本机 Codex 可执行文件"))
+    Err(AppError::new(
+        "codex_not_found",
+        "未找到本机 Codex 可执行文件",
+    ))
 }
 
 #[cfg(test)]

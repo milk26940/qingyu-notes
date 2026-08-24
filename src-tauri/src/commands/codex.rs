@@ -9,11 +9,17 @@ pub async fn codex_status(runtime: State<'_, CodexRuntime>) -> Result<CodexStatu
 }
 
 #[tauri::command]
-pub async fn codex_start(app: AppHandle, runtime: State<'_, CodexRuntime>) -> Result<CodexStatus, AppError> {
+pub async fn codex_start(
+    app: AppHandle,
+    runtime: State<'_, CodexRuntime>,
+) -> Result<CodexStatus, AppError> {
     runtime.start(&app).await
 }
 
 #[tauri::command]
-pub async fn codex_stop(app: AppHandle, runtime: State<'_, CodexRuntime>) -> Result<CodexStatus, AppError> {
+pub async fn codex_stop(
+    app: AppHandle,
+    runtime: State<'_, CodexRuntime>,
+) -> Result<CodexStatus, AppError> {
     runtime.stop(&app).await
 }

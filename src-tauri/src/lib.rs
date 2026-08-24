@@ -14,7 +14,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(runtime)
-        .invoke_handler(tauri::generate_handler![greet, commands::codex::codex_status, commands::codex::codex_start, commands::codex::codex_stop])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            commands::codex::codex_status,
+            commands::codex::codex_start,
+            commands::codex::codex_stop
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
