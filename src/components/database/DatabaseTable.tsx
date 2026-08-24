@@ -20,6 +20,18 @@ function PropertyEditor({ field, record }: { field: FieldDefinition; record: Pag
   return <input type={field.fieldType === "number" ? "number" : field.fieldType === "date" ? "date" : "text"} defaultValue={value == null ? "" : String(value)} onBlur={(event) => commit(field.fieldType === "number" ? (event.target.value ? Number(event.target.value) : null) : event.target.value)} className="w-full bg-transparent outline-none" />;
 }
 
+export function DatabaseRecordProperties({ record }: { record: Page }) {
+  const bundle = useDatabaseStore((state) => state.bundle);
+  const open = useDatabaseStore((state) => state.open);
+  useEffect(() => {
+    if (record.databaseId && bundle?.page.id !== record.databaseId) void open(record.databaseId);
+  }, [bundle?.page.id, open, record.databaseId]);
+  if (!record.databaseId || bundle?.page.id !== record.databaseId) return null;
+  return <div className="mb-4 grid grid-cols-[120px_minmax(0,1fr)] gap-x-3 gap-y-2 border-y border-[var(--qy-border)] py-3 text-[12px]">
+    {bundle.definition.fields.map((field) => <div className="contents" key={field.id}><div className="truncate py-1 text-[var(--qy-faint)]">{field.name}</div><div className="min-w-0 rounded px-2 py-1 hover:bg-[var(--qy-bg)]"><PropertyEditor field={field} record={record} /></div></div>)}
+  </div>;
+}
+
 function FilterControl({ fields, filters, onChange }: { fields: FieldDefinition[]; filters: DatabaseFilter[]; onChange: (filters: DatabaseFilter[]) => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [fieldId, setFieldId] = useState("");

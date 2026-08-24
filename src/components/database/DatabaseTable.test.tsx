@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DatabaseTable } from "./DatabaseTable";
+import { DatabaseRecordProperties, DatabaseTable } from "./DatabaseTable";
+import type { Page } from "../../lib/tauri/pages";
 
 const updateRecord = vi.hoisted(() => vi.fn());
 const openDatabase = vi.hoisted(() => vi.fn());
@@ -12,7 +13,7 @@ const state = vi.hoisted(() => ({
       { id: "field-2", name: "关联", fieldType: "relation", options: [] },
     ], views: [], createdAt: "0", updatedAt: "0" },
   },
-  records: [{ id: "record-1", title: "记录", kind: "databaseRecord", properties: { "field-1": "旧值", "field-2": [] } }],
+  records: [{ id: "record-1", title: "记录", kind: "databaseRecord", databaseId: "db-1", properties: { "field-1": "旧值", "field-2": [] } }],
   filters: [], sorts: [], open: openDatabase, addField: vi.fn(), addRecord: vi.fn(), updateRecord,
   setFilters: vi.fn(), setSorts: vi.fn(),
 }));
@@ -47,5 +48,13 @@ describe("DatabaseTable", () => {
       "记录",
       { "field-1": "旧值", "field-2": ["page-2"] },
     );
+  });
+
+  it("shows editable properties on a database record page", () => {
+    render(<DatabaseRecordProperties record={state.records[0] as unknown as Page} />);
+
+    expect(screen.getByText("说明")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("旧值")).toBeInTheDocument();
+    expect(screen.getByText("关联")).toBeInTheDocument();
   });
 });

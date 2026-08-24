@@ -9,10 +9,12 @@ function TreeNode({ page, childrenByParent, depth = 0 }: { page: PageSummary; ch
   const activeId = usePagesStore((state) => state.activePage?.id);
   const open = usePagesStore((state) => state.open);
   const move = usePagesStore((state) => state.move);
+  const create = usePagesStore((state) => state.create);
   return <div>
-    <div draggable onDragStart={(event) => event.dataTransfer.setData("text/qingyu-page", page.id)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData("text/qingyu-page"); if (id && id !== page.id) void move(id, page.id); }} className={`flex h-8 items-center gap-1 rounded-md pr-1 text-[13px] ${activeId === page.id ? "bg-[var(--qy-selected)] text-[var(--qy-ink)]" : "text-[var(--qy-muted)] hover:bg-white"}`} style={{ paddingLeft: `${8 + depth * 16}px` }}>
+    <div draggable onDragStart={(event) => event.dataTransfer.setData("text/qingyu-page", page.id)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData("text/qingyu-page"); if (id && id !== page.id) void move(id, page.id); }} className={`group flex h-8 items-center gap-1 rounded-md pr-1 text-[13px] ${activeId === page.id ? "bg-[var(--qy-selected)] text-[var(--qy-ink)]" : "text-[var(--qy-muted)] hover:bg-white"}`} style={{ paddingLeft: `${8 + depth * 16}px` }}>
       <button type="button" className="grid h-5 w-5 place-items-center" aria-label={expanded ? `收起${page.title}` : `展开${page.title}`} onClick={() => setExpanded((value) => !value)}>{children.length ? (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : null}</button>
       <button type="button" className="flex min-w-0 flex-1 items-center gap-2 truncate text-left" onClick={() => void open(page.id)}><FileText size={14} /><span className="truncate">{page.title}</span></button>
+      <button type="button" className="icon-button h-6 w-6 shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100" title="新建子页面" aria-label={`在${page.title}下新建子页面`} onClick={() => void create("未命名页面", page.id)}><FilePlus2 size={13} /></button>
     </div>
     {expanded && children.map((child) => <TreeNode key={child.id} page={child} childrenByParent={childrenByParent} depth={depth + 1} />)}
   </div>;

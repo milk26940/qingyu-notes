@@ -640,4 +640,27 @@ mod tests {
         assert!(repo.history(&child.id).unwrap().len() >= 4);
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn pages_support_deep_nesting_and_reject_parent_cycles() {
+        let root = std::env::temp_dir().join(format!("qingyu-nested-test-{}", Uuid::new_v4()));
+        let repo = PageRepository::open(root.clone()).unwrap();
+        let level_one = repo.create("一级".into(), None, String::new()).unwrap();
+        let level_two = repo
+            .create("二级".into(), Some(level_one.id.clone()), String::new())
+            .unwrap();
+        let level_three = repo
+            .create("三级".into(), Some(level_two.id.clone()), String::new())
+            .unwrap();
+        let level_four = repo
+            .create("四级".into(), Some(level_three.id.clone()), "正文".into())
+            .unwrap();
+
+        assert_eq!(repo.get(&level_four.id, false).unwrap().content, "正文");
+        let error = repo
+            .move_page(&level_one.id, Some(level_four.id), 0)
+            .unwrap_err();
+        assert_eq!(error.code, "page_invalid_parent");
+        let _ = fs::remove_dir_all(root);
+    }
 }
