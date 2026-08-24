@@ -25,14 +25,36 @@ pub struct DatabaseField {
     pub options: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseDefinition {
     pub id: String,
     pub page_id: String,
     pub fields: Vec<DatabaseField>,
+    #[serde(default = "default_views")]
+    pub views: Vec<DatabaseView>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DatabaseViewType {
+    Table,
+    Board,
+    Calendar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseView {
+    pub id: String,
+    pub name: String,
+    pub view_type: DatabaseViewType,
+    #[serde(default)]
+    pub filters: Vec<DatabaseFilter>,
+    #[serde(default)]
+    pub sorts: Vec<DatabaseSort>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,4 +106,14 @@ pub struct DatabaseQuery {
     pub filters: Vec<DatabaseFilter>,
     #[serde(default)]
     pub sorts: Vec<DatabaseSort>,
+}
+
+pub fn default_views() -> Vec<DatabaseView> {
+    vec![DatabaseView {
+        id: "table-default".into(),
+        name: "表格".into(),
+        view_type: DatabaseViewType::Table,
+        filters: Vec::new(),
+        sorts: Vec::new(),
+    }]
 }

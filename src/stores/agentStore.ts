@@ -24,6 +24,23 @@ type AgentStore = {
 const errorMessage = (error: unknown) => typeof error === "object" && error && "message" in error ? String(error.message) : String(error);
 const record = (kind: string, data: Record<string, unknown>): ConversationRecord => ({ kind, data, timestamp: String(Date.now()) });
 
+export function projectConversationHistory(records: ConversationRecord[]) {
+  let plan: unknown = null;
+  let diff = "";
+  const tools: CodexItemSummary[] = [];
+  for (const item of records) {
+    if (item.kind === "planUpdated") plan = item.data.plan ?? null;
+    if (item.kind === "diffUpdated" || item.kind === "changeSummary" || item.kind === "approvalRequested") diff = String(item.data.diff ?? "");
+    if (item.kind === "itemStarted" || item.kind === "itemCompleted") {
+      const summary = item.data.item as CodexItemSummary | undefined;
+      const existing = summary?.id ? tools.findIndex((entry) => entry.id === summary.id) : -1;
+      if (existing >= 0) tools.splice(existing, 1);
+      if (summary) tools.push(summary);
+    }
+  }
+  return { plan, diff, tools };
+}
+
 export const useAgentStore = create<AgentStore>((set, get) => ({
   conversations: [], activeId: null, records: [], streamingText: "", plan: null, diff: "", tools: [], approvals: [], sending: false, error: null,
   initialize: async () => {
@@ -46,7 +63,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     return () => { unlistenEvents(); unlistenApprovals(); unlistenPersistenceErrors(); };
   },
   create: async (scope, title = "新对话") => { try { const conversation = await api.createConversation(title, scope); set((state) => ({ conversations: [conversation, ...state.conversations], activeId: conversation.id, records: [], streamingText: "", plan: null, diff: "", tools: [], error: null })); return conversation; } catch (error) { set({ error: errorMessage(error) }); return null; } },
-  open: async (id) => { try { const records = await api.getConversationHistory(id); set({ activeId: id, records, streamingText: "", plan: null, diff: "", tools: [], error: null }); } catch (error) { set({ error: errorMessage(error) }); } },
+  open: async (id) => { try { const records = await api.getConversationHistory(id); const projection = projectConversationHistory(records); set({ activeId: id, records, streamingText: "", ...projection, error: null }); } catch (error) { set({ error: errorMessage(error) }); } },
   send: async (text, defaultScope) => { let id = get().activeId; if (!id) id = (await get().create(defaultScope, text.slice(0, 24) || "新对话"))?.id ?? null; if (!id) return; set((state) => ({ sending: true, streamingText: "", records: [...state.records, record("userMessage", { text })], error: null })); try { const turn = await api.sendConversationMessage(id, text); set((state) => ({ conversations: state.conversations.map((item) => item.id === id ? { ...item, threadId: turn.threadId, activeTurnId: turn.turnId } : item) })); } catch (error) { set({ sending: false, error: errorMessage(error) }); } },
   interrupt: async () => { const active = get().conversations.find((item) => item.id === get().activeId); if (!active?.threadId || !active.activeTurnId) return; try { await api.interruptConversation(active.threadId, active.activeTurnId); set({ sending: false }); } catch (error) { set({ error: errorMessage(error) }); } },
   resolveApproval: async (id, approved) => { try { await api.resolveApproval(id, approved); set((state) => ({ approvals: state.approvals.filter((item) => item.id !== id) })); } catch (error) { set({ error: errorMessage(error) }); } },

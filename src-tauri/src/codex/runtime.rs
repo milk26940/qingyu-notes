@@ -22,7 +22,7 @@ use super::protocol::{
 };
 use crate::backup::model::BackupScope;
 use crate::backup::repository::BackupRepository;
-use crate::database::model::{DatabaseFieldType, DatabaseQuery};
+use crate::database::model::DatabaseFieldType;
 use crate::database::repository::DatabaseRepository;
 use crate::error::AppError;
 use crate::pages::model::PageLink;
@@ -271,21 +271,23 @@ impl CodexRuntime {
         cwd: &Path,
         scope_instruction: &str,
     ) -> Result<String, AppError> {
-        let result = self
+        let result = match self
             .request(
                 "thread/start",
-                json!({
-                    "cwd": cwd.to_string_lossy(), "approvalPolicy": "never", "sandbox": "read-only",
-                    "serviceName": "qingyu_notes", "developerInstructions": scope_instruction,
-                    "dynamicTools": qingyu_dynamic_tools(),
-                    "environments": [], "selectedCapabilityRoots": [],
-                    "config": {
-                        "features": { "shell_tool": false, "apps": false, "plugins": false },
-                        "web_search": "disabled", "agents": { "enabled": false }, "mcp_servers": {}
-                    }
-                }),
+                thread_start_params(cwd, scope_instruction, true),
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if dynamic_tools_unavailable(&error) => {
+                self.request(
+                    "thread/start",
+                    thread_start_params(cwd, scope_instruction, false),
+                )
+                .await?
+            }
+            Err(error) => return Err(error),
+        };
         result
             .pointer("/thread/id")
             .and_then(Value::as_str)
@@ -379,6 +381,32 @@ impl CodexRuntime {
         } else {
             Err(AppError::new("tool_rejected", "用户拒绝了此操作"))
         };
+        if let Some(store) = self.conversations.read().await.clone() {
+            let _ = store.append_approval(
+                &approval.thread_id,
+                &approval.id,
+                &approval.namespace,
+                &approval.tool,
+                &approval.diff,
+                Some(approved),
+            );
+            let _ = store.append_tool_outcome(
+                &approval.thread_id,
+                &approval.id,
+                &approval.namespace,
+                &approval.tool,
+                result.is_ok(),
+            );
+            if result.is_ok() {
+                let _ = store.append_change_summary(
+                    &approval.thread_id,
+                    &approval.id,
+                    &approval.namespace,
+                    &approval.tool,
+                    &approval.diff,
+                );
+            }
+        }
         if result.is_ok() {
             emit_vault_change(
                 app,
@@ -531,9 +559,60 @@ impl CodexRuntime {
                 .lock()
                 .await
                 .insert(call_id, approval.clone());
+            if let Some(store) = self.conversations.read().await.clone() {
+                let _ = store.append_approval(
+                    &approval.thread_id,
+                    &approval.id,
+                    &approval.namespace,
+                    &approval.tool,
+                    &approval.diff,
+                    None,
+                );
+            }
+            let _ = app.emit(
+                "codex://event",
+                CodexEvent::TurnDiffUpdated {
+                    thread_id: approval.thread_id.clone(),
+                    turn_id: approval.turn_id.clone(),
+                    diff: approval.diff.clone(),
+                },
+            );
             let _ = app.emit("codex://approval", approval);
         } else {
+            let diff = if is_write_tool(&namespace, &tool) {
+                self.describe_change(&namespace, &tool, &arguments)
+                    .await
+                    .ok()
+            } else {
+                None
+            };
+            if let Some(diff) = &diff {
+                let event = CodexEvent::TurnDiffUpdated {
+                    thread_id: thread_id.clone(),
+                    turn_id: turn_id.clone(),
+                    diff: diff.clone(),
+                };
+                if let Some(store) = self.conversations.read().await.clone() {
+                    let _ = store.append_event(&thread_id, &event);
+                }
+                let _ = app.emit("codex://event", event);
+            }
             let result = self.execute_tool(&namespace, &tool, &arguments).await;
+            if let Some(store) = self.conversations.read().await.clone() {
+                let _ = store.append_tool_outcome(
+                    &thread_id,
+                    &call_id,
+                    &namespace,
+                    &tool,
+                    result.is_ok(),
+                );
+                if result.is_ok() {
+                    if let Some(diff) = &diff {
+                        let _ = store
+                            .append_change_summary(&thread_id, &call_id, &namespace, &tool, diff);
+                    }
+                }
+            }
             if result.is_ok() {
                 emit_vault_change(app, &namespace, &tool, &arguments);
             }
@@ -666,8 +745,12 @@ impl CodexRuntime {
             }
             ("database", "query") => {
                 let repo = DatabaseRepository::from_pages(pages.clone())?;
-                serde_json::to_value(repo.query(string("databaseId")?, DatabaseQuery::default())?)
-                    .unwrap()
+                let query = serde_json::from_value(json!({
+                    "filters": arguments.get("filters").cloned().unwrap_or_else(|| json!([])),
+                    "sorts": arguments.get("sorts").cloned().unwrap_or_else(|| json!([]))
+                }))
+                .map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
+                serde_json::to_value(repo.query(string("databaseId")?, query)?).unwrap()
             }
             ("database", "create_record") => {
                 let repo = DatabaseRepository::from_pages(pages.clone())?;
@@ -822,6 +905,12 @@ impl CodexRuntime {
                     target.id
                 ))
             }
+            _ if is_write_tool(namespace, tool) => Ok(format!(
+                "执行 {}.{}\n{}",
+                namespace,
+                tool,
+                serde_json::to_string_pretty(arguments).unwrap_or_default()
+            )),
             _ => Err(AppError::new(
                 "tool_preview_unsupported",
                 "无法为此危险操作生成变更预览",
@@ -855,8 +944,51 @@ impl CodexRuntime {
 fn is_dangerous(namespace: &str, tool: &str) -> bool {
     matches!(
         (namespace, tool),
-        ("page", "update" | "archive") | ("database", "update_schema") | ("relation", "unlink")
+        ("page", "update" | "archive")
+            | ("database", "update_schema" | "update_record")
+            | ("relation", "unlink")
     )
+}
+
+fn is_write_tool(namespace: &str, tool: &str) -> bool {
+    matches!(
+        (namespace, tool),
+        ("page", "create" | "update" | "move" | "archive")
+            | (
+                "database",
+                "update_schema" | "create_record" | "update_record"
+            )
+            | ("relation", "link" | "unlink")
+    )
+}
+
+fn thread_start_params(cwd: &Path, scope_instruction: &str, dynamic_tools: bool) -> Value {
+    let mut params = json!({
+        "cwd": cwd.to_string_lossy(), "approvalPolicy": "never", "sandbox": "read-only",
+        "serviceName": "qingyu_notes", "developerInstructions": scope_instruction,
+        "environments": [], "selectedCapabilityRoots": [],
+        "config": {
+            "features": { "shell_tool": false, "apps": false, "plugins": false },
+            "web_search": "disabled", "agents": { "enabled": false }, "mcp_servers": {}
+        }
+    });
+    if dynamic_tools {
+        params["dynamicTools"] = qingyu_dynamic_tools();
+    } else {
+        params["developerInstructions"] = json!(format!(
+            "{}\n当前 App Server 不支持轻羽动态工具。只能回答只读问题，不得尝试修改文件。",
+            scope_instruction
+        ));
+    }
+    params
+}
+
+fn dynamic_tools_unavailable(error: &AppError) -> bool {
+    let message = error.message.to_lowercase();
+    message.contains("dynamictool")
+        || message.contains("experimental")
+        || message.contains("unsupported")
+        || message.contains("unknown field")
 }
 
 fn approval_matches(approval: &PendingApproval, generation: u64, vault_root: &str) -> bool {
@@ -982,9 +1114,25 @@ mod tests {
         assert!(is_dangerous("page", "update"));
         assert!(is_dangerous("page", "archive"));
         assert!(is_dangerous("database", "update_schema"));
+        assert!(is_dangerous("database", "update_record"));
         assert!(is_dangerous("relation", "unlink"));
         assert!(!is_dangerous("page", "search"));
         assert!(!is_dangerous("relation", "link"));
+        assert!(is_write_tool("page", "create"));
+        assert!(is_write_tool("database", "update_record"));
+        assert!(!is_write_tool("page", "read"));
+    }
+
+    #[test]
+    fn unsupported_dynamic_tools_fall_back_to_read_only_thread() {
+        let error = AppError::new("codex_rpc_error", "unsupported dynamicTools capability");
+        assert!(dynamic_tools_unavailable(&error));
+        let params = thread_start_params(Path::new(r"C:\notes"), "读取当前页面", false);
+        assert!(params.get("dynamicTools").is_none());
+        assert!(params["developerInstructions"]
+            .as_str()
+            .unwrap()
+            .contains("只能回答只读问题"));
     }
 
     #[test]

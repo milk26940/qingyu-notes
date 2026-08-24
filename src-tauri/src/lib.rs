@@ -47,6 +47,7 @@ pub fn run() {
             commands::database::database_create_record,
             commands::database::database_update_record,
             commands::database::database_query,
+            commands::database::database_update_table_view,
             commands::conversations::conversation_create,
             commands::conversations::conversation_list,
             commands::conversations::conversation_history,

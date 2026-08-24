@@ -10,11 +10,13 @@ const operatorLabels: Record<FilterOperator, string> = { equals: "等于", notEq
 
 function PropertyEditor({ field, record }: { field: FieldDefinition; record: Page }) {
   const updateRecord = useDatabaseStore((state) => state.updateRecord);
+  const pages = usePagesStore((state) => state.pages);
   const value = record.properties?.[field.id];
   const commit = (next: unknown) => void updateRecord(record, record.title, { ...(record.properties ?? {}), [field.id]: next });
   if (field.fieldType === "checkbox") return <input type="checkbox" checked={Boolean(value)} onChange={(event) => commit(event.target.checked)} aria-label={`${record.title}-${field.name}`} />;
   if (field.fieldType === "select") return <select value={String(value ?? "")} onChange={(event) => commit(event.target.value)} className="w-full bg-transparent text-[12px]"><option value="" />{field.options.map((option) => <option key={option}>{option}</option>)}</select>;
-  if (field.fieldType === "multiSelect" || field.fieldType === "relation") return <input defaultValue={Array.isArray(value) ? value.join(", ") : ""} onBlur={(event) => commit(event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} className="w-full bg-transparent outline-none" placeholder={field.fieldType === "relation" ? "页面 UUID，逗号分隔" : "选项，逗号分隔"} />;
+  if (field.fieldType === "multiSelect") return <select multiple value={Array.isArray(value) ? value.map(String) : []} onChange={(event) => commit(Array.from(event.currentTarget.selectedOptions, (option) => option.value))} className="h-14 w-full bg-transparent text-[11px]">{field.options.map((option) => <option key={option} value={option}>{option}</option>)}</select>;
+  if (field.fieldType === "relation") return <select multiple value={Array.isArray(value) ? value.map(String) : []} onChange={(event) => commit(Array.from(event.currentTarget.selectedOptions, (option) => option.value))} className="h-14 w-full bg-transparent text-[11px]" aria-label={`${record.title}-${field.name}`}>{pages.filter((page) => page.id !== record.id).map((page) => <option key={page.id} value={page.id}>{page.title}</option>)}</select>;
   return <input type={field.fieldType === "number" ? "number" : field.fieldType === "date" ? "date" : "text"} defaultValue={value == null ? "" : String(value)} onBlur={(event) => commit(field.fieldType === "number" ? (event.target.value ? Number(event.target.value) : null) : event.target.value)} className="w-full bg-transparent outline-none" />;
 }
 

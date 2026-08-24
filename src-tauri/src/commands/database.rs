@@ -81,3 +81,14 @@ pub async fn database_query(
 ) -> Result<Vec<Page>, AppError> {
     repository(&state).await?.query(&database_id, query)
 }
+
+#[tauri::command]
+pub async fn database_update_table_view(
+    state: State<'_, PageState>,
+    database_id: String,
+    query: DatabaseQuery,
+) -> Result<DatabaseDefinition, AppError> {
+    repository(&state)
+        .await?
+        .update_table_view(&database_id, query)
+}

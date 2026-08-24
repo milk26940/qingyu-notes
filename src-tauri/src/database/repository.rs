@@ -7,8 +7,8 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::model::{
-    DatabaseDefinition, DatabaseField, DatabaseFieldType, DatabaseQuery, FilterOperator,
-    SortDirection,
+    default_views, DatabaseDefinition, DatabaseField, DatabaseFieldType, DatabaseQuery,
+    DatabaseViewType, FilterOperator, SortDirection,
 };
 use crate::error::AppError;
 use crate::pages::model::{Page, PageKind};
@@ -55,6 +55,7 @@ impl DatabaseRepository {
             id: page.id.clone(),
             page_id: page.id.clone(),
             fields: Vec::new(),
+            views: default_views(),
             created_at: timestamp.clone(),
             updated_at: timestamp,
         };
@@ -135,6 +136,34 @@ impl DatabaseRepository {
 
     pub fn query(&self, database_id: &str, query: DatabaseQuery) -> Result<Vec<Page>, AppError> {
         let definition = self.get(database_id)?;
+        self.validate_query(&definition, &query)?;
+        self.query_validated(database_id, query)
+    }
+
+    pub fn update_table_view(
+        &self,
+        database_id: &str,
+        query: DatabaseQuery,
+    ) -> Result<DatabaseDefinition, AppError> {
+        let mut definition = self.get(database_id)?;
+        self.validate_query(&definition, &query)?;
+        let view = definition
+            .views
+            .iter_mut()
+            .find(|view| view.view_type == DatabaseViewType::Table)
+            .ok_or_else(|| AppError::new("database_table_view_not_found", "数据库缺少表格视图"))?;
+        view.filters = query.filters;
+        view.sorts = query.sorts;
+        definition.updated_at = timestamp();
+        self.write_definition(&definition)?;
+        Ok(definition)
+    }
+
+    fn validate_query(
+        &self,
+        definition: &DatabaseDefinition,
+        query: &DatabaseQuery,
+    ) -> Result<(), AppError> {
         let fields: HashMap<_, _> = definition
             .fields
             .iter()
@@ -150,7 +179,14 @@ impl DatabaseRepository {
                 return Err(AppError::new("database_field_not_found", "排序字段不存在"));
             }
         }
+        Ok(())
+    }
 
+    fn query_validated(
+        &self,
+        database_id: &str,
+        query: DatabaseQuery,
+    ) -> Result<Vec<Page>, AppError> {
         let mut records: Vec<_> = self
             .pages
             .list(false)?
@@ -346,8 +382,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::model::{
-        DatabaseFieldType, DatabaseFilter, DatabaseQuery, DatabaseSort, FilterOperator,
-        SortDirection,
+        DatabaseFieldType, DatabaseFilter, DatabaseQuery, DatabaseSort, DatabaseViewType,
+        FilterOperator, SortDirection,
     };
     use super::DatabaseRepository;
     use crate::pages::model::PageKind;
@@ -464,6 +500,108 @@ mod tests {
             .create_record(&definition.id, "错误关联".into(), properties)
             .unwrap_err();
         assert_eq!(error.code, "database_invalid_relation");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_field_type_and_table_view_are_persisted() {
+        let (repo, root) = temporary_repository();
+        let (_, definition) = repo.create_database("资料".into(), None).unwrap();
+        let text = repo
+            .add_field(
+                &definition.id,
+                "文本".into(),
+                DatabaseFieldType::Text,
+                vec![],
+            )
+            .unwrap();
+        let number = repo
+            .add_field(
+                &definition.id,
+                "数字".into(),
+                DatabaseFieldType::Number,
+                vec![],
+            )
+            .unwrap();
+        let select = repo
+            .add_field(
+                &definition.id,
+                "单选".into(),
+                DatabaseFieldType::Select,
+                vec!["甲".into()],
+            )
+            .unwrap();
+        let multi = repo
+            .add_field(
+                &definition.id,
+                "多选".into(),
+                DatabaseFieldType::MultiSelect,
+                vec!["乙".into(), "丙".into()],
+            )
+            .unwrap();
+        let date = repo
+            .add_field(
+                &definition.id,
+                "日期".into(),
+                DatabaseFieldType::Date,
+                vec![],
+            )
+            .unwrap();
+        let checkbox = repo
+            .add_field(
+                &definition.id,
+                "勾选".into(),
+                DatabaseFieldType::Checkbox,
+                vec![],
+            )
+            .unwrap();
+        let target = repo
+            .pages
+            .create("目标".into(), None, String::new())
+            .unwrap();
+        let relation = repo
+            .add_field(
+                &definition.id,
+                "关系".into(),
+                DatabaseFieldType::Relation,
+                vec![],
+            )
+            .unwrap();
+        let properties = BTreeMap::from([
+            (text.id.clone(), json!("内容")),
+            (number.id.clone(), json!(42)),
+            (select.id.clone(), json!("甲")),
+            (multi.id.clone(), json!(["乙", "丙"])),
+            (date.id.clone(), json!("2026-08-24")),
+            (checkbox.id.clone(), json!(true)),
+            (relation.id.clone(), json!([target.id])),
+        ]);
+        repo.create_record(&definition.id, "记录".into(), properties)
+            .unwrap();
+
+        let query = DatabaseQuery {
+            filters: vec![DatabaseFilter {
+                field_id: checkbox.id,
+                operator: FilterOperator::Equals,
+                value: json!(true),
+            }],
+            sorts: vec![DatabaseSort {
+                field_id: number.id,
+                direction: SortDirection::Descending,
+            }],
+        };
+        repo.update_table_view(&definition.id, query.clone())
+            .unwrap();
+        let reopened = DatabaseRepository::open(root.clone()).unwrap();
+        let persisted = reopened.get(&definition.id).unwrap();
+        let table = persisted
+            .views
+            .iter()
+            .find(|view| view.view_type == DatabaseViewType::Table)
+            .unwrap();
+        assert_eq!(table.filters, query.filters);
+        assert_eq!(table.sorts, query.sorts);
+        assert_eq!(reopened.query(&definition.id, query).unwrap().len(), 1);
         let _ = fs::remove_dir_all(root);
     }
 }

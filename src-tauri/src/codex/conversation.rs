@@ -213,6 +213,72 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub fn append_tool_outcome(
+        &self,
+        thread_id: &str,
+        call_id: &str,
+        namespace: &str,
+        tool: &str,
+        success: bool,
+    ) -> Result<(), AppError> {
+        self.append_for_thread(
+            thread_id,
+            "toolCompleted",
+            json!({
+                "callId": call_id,
+                "namespace": namespace,
+                "tool": tool,
+                "success": success
+            }),
+        )
+    }
+
+    pub fn append_approval(
+        &self,
+        thread_id: &str,
+        call_id: &str,
+        namespace: &str,
+        tool: &str,
+        diff: &str,
+        approved: Option<bool>,
+    ) -> Result<(), AppError> {
+        self.append_for_thread(
+            thread_id,
+            if approved.is_some() {
+                "approvalResolved"
+            } else {
+                "approvalRequested"
+            },
+            json!({
+                "callId": call_id,
+                "namespace": namespace,
+                "tool": tool,
+                "diff": diff,
+                "approved": approved
+            }),
+        )
+    }
+
+    pub fn append_change_summary(
+        &self,
+        thread_id: &str,
+        call_id: &str,
+        namespace: &str,
+        tool: &str,
+        diff: &str,
+    ) -> Result<(), AppError> {
+        self.append_for_thread(
+            thread_id,
+            "changeSummary",
+            json!({
+                "callId": call_id,
+                "namespace": namespace,
+                "tool": tool,
+                "diff": diff
+            }),
+        )
+    }
+
     pub fn history(&self, id: &str) -> Result<Vec<ConversationRecord>, AppError> {
         self.get(id)?;
         let _guard = self.lock()?;
@@ -255,6 +321,20 @@ impl ConversationStore {
             .list()?
             .into_iter()
             .find(|conversation| conversation.thread_id.as_deref() == Some(thread_id)))
+    }
+
+    fn append_for_thread(&self, thread_id: &str, kind: &str, data: Value) -> Result<(), AppError> {
+        let Some(conversation) = self.by_thread(thread_id)? else {
+            return Ok(());
+        };
+        self.append(
+            &conversation.id,
+            ConversationRecord {
+                kind: kind.into(),
+                timestamp: now(),
+                data,
+            },
+        )
     }
 
     fn update(
@@ -427,6 +507,54 @@ mod tests {
             handle.join().unwrap().unwrap();
         }
         assert_eq!(store.list().unwrap().len(), 8);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn persists_tool_approval_and_change_projection() {
+        let root = std::env::temp_dir().join(format!("qingyu-conversation-{}", Uuid::new_v4()));
+        let store = ConversationStore::open(&root).unwrap();
+        let conversation = store
+            .create("修改页面".into(), ConversationScope::Vault)
+            .unwrap();
+        store
+            .attach_thread(&conversation.id, "thread-1".into())
+            .unwrap();
+        store
+            .append_approval("thread-1", "call-1", "page", "update", "+ 新正文", None)
+            .unwrap();
+        store
+            .append_approval(
+                "thread-1",
+                "call-1",
+                "page",
+                "update",
+                "+ 新正文",
+                Some(true),
+            )
+            .unwrap();
+        store
+            .append_tool_outcome("thread-1", "call-1", "page", "update", true)
+            .unwrap();
+        store
+            .append_change_summary("thread-1", "call-1", "page", "update", "+ 新正文")
+            .unwrap();
+
+        let kinds = store
+            .history(&conversation.id)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "approvalRequested",
+                "approvalResolved",
+                "toolCompleted",
+                "changeSummary"
+            ]
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

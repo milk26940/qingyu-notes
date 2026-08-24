@@ -304,7 +304,11 @@ pub fn qingyu_dynamic_tools() -> Value {
         ("archive", "将页面移入回收站", id_schema("id")),
     ];
     let database_tools = [
-        ("query", "查询数据库记录", id_schema("databaseId")),
+        (
+            "query",
+            "按组合筛选和多字段排序查询数据库记录",
+            json!({ "type": "object", "properties": { "databaseId": { "type": "string" }, "filters": { "type": "array", "items": { "type": "object" } }, "sorts": { "type": "array", "items": { "type": "object" } } }, "required": ["databaseId"] }),
+        ),
         (
             "update_schema",
             "修改数据库字段模型",
@@ -318,7 +322,7 @@ pub fn qingyu_dynamic_tools() -> Value {
         (
             "update_record",
             "更新数据库记录属性",
-            json!({ "type": "object", "properties": { "id": { "type": "string" }, "properties": { "type": "object" } }, "required": ["id", "properties"] }),
+            json!({ "type": "object", "properties": { "id": { "type": "string" }, "title": { "type": "string" }, "properties": { "type": "object" } }, "required": ["id", "properties"] }),
         ),
     ];
     let relation_tools = [
