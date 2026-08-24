@@ -72,6 +72,18 @@ pub async fn page_update(
 }
 
 #[tauri::command]
+pub async fn page_store_asset(
+    state: State<'_, PageState>,
+    page_id: String,
+    original_name: String,
+    bytes: Vec<u8>,
+) -> Result<String, AppError> {
+    repo(&state)
+        .await?
+        .store_asset(&page_id, &original_name, &bytes)
+}
+
+#[tauri::command]
 pub async fn page_move(
     state: State<'_, PageState>,
     id: String,

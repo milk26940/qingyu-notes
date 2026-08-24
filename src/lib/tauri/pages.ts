@@ -14,6 +14,7 @@ export const listPages = (includeTrash = false) => invoke<PageSummary[]>("page_l
 export const getPage = (id: string, includeTrash = false) => invoke<Page>("page_get", { id, includeTrash });
 export const createPage = (title: string, parentId: string | null, content: string) => invoke<Page>("page_create", { title, parentId, content });
 export const updatePage = (id: string, title: string, content: string) => invoke<Page>("page_update", { id, title, content });
+export const storePageAsset = (pageId: string, originalName: string, bytes: number[]) => invoke<string>("page_store_asset", { pageId, originalName, bytes });
 export const movePage = (id: string, parentId: string | null, sortOrder: number) => invoke<Page>("page_move", { id, parentId, sortOrder });
 export const trashPage = (id: string) => invoke<Page>("page_trash", { id });
 export const restorePage = (id: string) => invoke<Page>("page_restore", { id });

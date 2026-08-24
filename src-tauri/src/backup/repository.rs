@@ -259,6 +259,14 @@ impl BackupRepository {
                         files.push((relative, definition));
                     }
                 }
+                let assets = self
+                    .vault_root
+                    .join(".noteapp")
+                    .join("assets")
+                    .join(page_id);
+                if assets.exists() {
+                    walk_files(&self.vault_root, &assets, &mut files)?;
+                }
                 Ok(files)
             }
         }
@@ -580,6 +588,50 @@ mod tests {
             .unwrap();
         repo.restore(&vault_snapshot.id).unwrap();
         assert_eq!(pages.get(&first.id, false).unwrap().content, "版本一");
+        let _ = fs::remove_dir_all(vault.parent().unwrap());
+    }
+
+    #[test]
+    fn page_snapshots_include_and_restore_page_assets() {
+        let (vault, backups) = roots();
+        let pages = PageRepository::open(vault.clone()).unwrap();
+        let page = pages.create("图片页".into(), None, String::new()).unwrap();
+        let relative = pages
+            .store_asset(&page.id, "image.png", &[137, 80, 78, 71, 13, 10, 26, 10, 1])
+            .unwrap();
+        let asset = vault.join(relative.trim_start_matches('/'));
+        let repo = BackupRepository::open_at(&vault, &backups).unwrap();
+
+        let vault_snapshot = repo.checkpoint(BackupScope::Vault, "manual").unwrap();
+        assert!(vault_snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.path == relative.trim_start_matches('/')));
+        let zip_path = vault.parent().unwrap().join("assets.zip");
+        repo.export_zip(&zip_path).unwrap();
+        let mut archive = ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
+        assert!(archive.by_name(relative.trim_start_matches('/')).is_ok());
+        drop(archive);
+
+        let snapshot = repo
+            .checkpoint(
+                BackupScope::Page {
+                    page_id: page.id.clone(),
+                },
+                "manual",
+            )
+            .unwrap();
+        assert!(snapshot
+            .entries
+            .iter()
+            .any(|entry| entry.path == relative.trim_start_matches('/')));
+
+        fs::write(&asset, b"changed").unwrap();
+        repo.restore(&snapshot.id).unwrap();
+        assert_eq!(
+            fs::read(asset).unwrap(),
+            [137, 80, 78, 71, 13, 10, 26, 10, 1]
+        );
         let _ = fs::remove_dir_all(vault.parent().unwrap());
     }
 

@@ -34,6 +34,7 @@ pub fn run() {
             commands::pages::page_get,
             commands::pages::page_create,
             commands::pages::page_update,
+            commands::pages::page_store_asset,
             commands::pages::page_move,
             commands::pages::page_trash,
             commands::pages::page_restore,

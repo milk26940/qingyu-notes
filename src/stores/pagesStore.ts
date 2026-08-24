@@ -15,6 +15,7 @@ type PagesStore = {
   searchQuery: string;
   saveState: SaveState;
   error: string | null;
+  reportError: (message: string) => void;
   init: (path?: string) => Promise<void>;
   refresh: () => Promise<void>;
   open: (id: string) => Promise<void>;
@@ -33,6 +34,7 @@ const failure = (error: unknown) => (typeof error === "object" && error && "mess
 
 export const usePagesStore = create<PagesStore>((set, get) => ({
   vaultPath: null, pages: [], trash: [], activePage: null, links: [], backlinks: [], history: [], searchResults: [], searchQuery: "", saveState: "idle", error: null,
+  reportError: (error) => set({ error }),
   init: async (path) => { try { const vaultPath = await api.initVault(path); set({ vaultPath, error: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
   refresh: async () => { try { const [pages, trash] = await Promise.all([api.listPages(), api.listPages(true)]); set({ pages: pages.filter((page) => !page.trashedAt), trash: trash.filter((page) => page.trashedAt), error: null }); } catch (error) { set({ error: failure(error) }); } },
   open: async (id) => { try { const [activePage, links, backlinks, history] = await Promise.all([api.getPage(id), api.getPageLinks(id), api.getPageBacklinks(id), api.getPageHistory(id)]); set({ activePage, links, backlinks, history, saveState: "idle", error: null }); } catch (error) { set({ error: failure(error) }); } },

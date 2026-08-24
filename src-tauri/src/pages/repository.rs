@@ -193,6 +193,40 @@ impl PageRepository {
         Ok(page)
     }
 
+    pub fn store_asset(
+        &self,
+        page_id: &str,
+        original_name: &str,
+        bytes: &[u8],
+    ) -> Result<String, AppError> {
+        if bytes.len() > 20 * 1024 * 1024 {
+            return Err(AppError::new("asset_too_large", "图片不能超过 20 MiB"));
+        }
+        let name_path = Path::new(original_name);
+        if original_name.is_empty()
+            || name_path.components().count() != 1
+            || name_path.file_name().and_then(|name| name.to_str()) != Some(original_name)
+        {
+            return Err(AppError::new("asset_invalid_name", "图片文件名不安全"));
+        }
+        let extension = image_extension(bytes)
+            .ok_or_else(|| AppError::new("asset_invalid_type", "仅支持 PNG、JPEG、GIF 和 WebP"))?;
+        let _ = self.get(page_id, false)?;
+        let directory = self.root.join(".noteapp").join("assets").join(page_id);
+        fs::create_dir_all(&directory)
+            .map_err(|error| AppError::new("asset_write_failed", error.to_string()))?;
+        let file_name = format!("{}.{}", Uuid::new_v4(), extension);
+        let destination = directory.join(&file_name);
+        let temporary = directory.join(format!("{}.tmp", Uuid::new_v4()));
+        fs::write(&temporary, bytes)
+            .map_err(|error| AppError::new("asset_write_failed", error.to_string()))?;
+        fs::rename(&temporary, &destination).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            AppError::new("asset_write_failed", error.to_string())
+        })?;
+        Ok(format!("/.noteapp/assets/{page_id}/{file_name}"))
+    }
+
     pub fn move_page(
         &self,
         id: &str,
@@ -548,6 +582,20 @@ fn serialize_markdown(page: &Page) -> String {
     let properties = serde_json::to_string(&page.properties).unwrap_or_else(|_| "{}".to_owned());
     format!("---\nid: {}\ntitle: {}\nparent_id: {}\nkind: {}\ncreated_at: {}\nupdated_at: {}\ntrashed_at: {}\nsort_order: {}\ndatabase_id: {}\nproperties: {}\n---\n{}", page.id, page.title.replace('\n', " "), page.parent_id.as_deref().unwrap_or(""), kind, page.created_at, page.updated_at, page.trashed_at.as_deref().unwrap_or(""), page.sort_order, page.database_id.as_deref().unwrap_or(""), properties, page.content)
 }
+
+fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) {
+        Some("png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
 fn parse_markdown(text: &str) -> Result<Page, AppError> {
     let (front, content) = text
         .strip_prefix("---\n")
@@ -661,6 +709,48 @@ mod tests {
             .move_page(&level_one.id, Some(level_four.id), 0)
             .unwrap_err();
         assert_eq!(error.code, "page_invalid_parent");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn image_assets_are_validated_and_stored_inside_the_page_directory() {
+        let root = std::env::temp_dir().join(format!("qingyu-asset-test-{}", Uuid::new_v4()));
+        let repo = PageRepository::open(root.clone()).unwrap();
+        let page = repo.create("图片".into(), None, String::new()).unwrap();
+        let png = [137, 80, 78, 71, 13, 10, 26, 10, 0];
+
+        let relative = repo.store_asset(&page.id, "image.png", &png).unwrap();
+        assert!(relative.starts_with(&format!("/.noteapp/assets/{}/", page.id)));
+        assert!(relative.ends_with(".png"));
+        assert_eq!(
+            fs::read(root.join(relative.trim_start_matches('/'))).unwrap(),
+            png
+        );
+
+        assert_eq!(
+            repo.store_asset(&page.id, "../image.png", &png)
+                .unwrap_err()
+                .code,
+            "asset_invalid_name"
+        );
+        assert_eq!(
+            repo.store_asset(&page.id, "image.png", b"not an image")
+                .unwrap_err()
+                .code,
+            "asset_invalid_type"
+        );
+        assert_eq!(
+            repo.store_asset("missing-page", "image.png", &png)
+                .unwrap_err()
+                .code,
+            "page_not_found"
+        );
+        assert_eq!(
+            repo.store_asset(&page.id, "large.png", &vec![0; 20 * 1024 * 1024 + 1])
+                .unwrap_err()
+                .code,
+            "asset_too_large"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
