@@ -4,19 +4,24 @@ import { EditorView } from "@codemirror/view";
 import { ImagePlus } from "lucide-react";
 import { createEditorExtensions } from "./editorExtensions";
 import { storeImageAttachment, supportedImageFiles } from "./imageAttachments";
+import type { PageSummary } from "../../lib/tauri/pages";
 
-export type MarkdownEditorProps = { pageId?: string; value: string; onChange: (value: string) => void; onError?: (message: string) => void; readOnly?: boolean };
+export type MarkdownEditorProps = { pageId?: string; pages?: PageSummary[]; value: string; onChange: (value: string) => void; onOpenPage?: (id: string) => void; onError?: (message: string) => void; readOnly?: boolean };
 
-export function MarkdownEditor({ pageId, value, onChange, onError, readOnly = false }: MarkdownEditorProps) {
+export function MarkdownEditor({ pageId, pages = [], value, onChange, onOpenPage, onError, readOnly = false }: MarkdownEditorProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const viewRef = useRef<EditorView>();
   const valueRef = useRef(value);
   const onChangeRef = useRef(onChange);
+  const pagesRef = useRef(pages);
+  const onOpenPageRef = useRef(onOpenPage);
   onChangeRef.current = onChange;
+  pagesRef.current = pages;
+  onOpenPageRef.current = onOpenPage;
   useEffect(() => {
     if (!hostRef.current) return;
-    const view = new EditorView({ state: EditorState.create({ doc: value, extensions: createEditorExtensions((next) => { valueRef.current = next; onChangeRef.current(next); }, readOnly) }), parent: hostRef.current });
+    const view = new EditorView({ state: EditorState.create({ doc: value, extensions: createEditorExtensions((next) => { valueRef.current = next; onChangeRef.current(next); }, readOnly, { getPages: () => pagesRef.current, onOpenPage: (id) => onOpenPageRef.current?.(id), onMissingPage: () => onError?.("页面不存在") }) }), parent: hostRef.current });
     viewRef.current = view;
     return () => { view.destroy(); viewRef.current = undefined; };
   }, [readOnly]);

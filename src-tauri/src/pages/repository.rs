@@ -553,8 +553,9 @@ fn safe_name(title: &str) -> String {
     }
 }
 fn extract_link_tokens(content: &str) -> Vec<(String, Option<String>)> {
-    let mut out = Vec::new();
+    let mut found = Vec::new();
     let mut rest = content;
+    let mut offset = 0;
     while let Some(start) = rest.find("[[") {
         let tail = &rest[start + 2..];
         if let Some(end) = tail.find("]]") {
@@ -564,14 +565,47 @@ fn extract_link_tokens(content: &str) -> Vec<(String, Option<String>)> {
                 .map(|(label, target)| (label.trim(), Some(target.trim().to_owned())))
                 .unwrap_or((raw, None));
             if !label.is_empty() {
-                out.push((label.to_owned(), target));
+                found.push((offset + start, label.to_owned(), target));
             }
+            offset += start + 2 + end + 2;
             rest = &tail[end + 2..];
         } else {
             break;
         }
     }
-    out
+
+    let marker = "](qingyu://page/";
+    let mut search_from = 0;
+    while let Some(relative) = content[search_from..].find(marker) {
+        let marker_start = search_from + relative;
+        let Some(label_start) = content[..marker_start].rfind('[') else {
+            search_from = marker_start + marker.len();
+            continue;
+        };
+        if label_start > 0 && content.as_bytes()[label_start - 1] == b'!' {
+            search_from = marker_start + marker.len();
+            continue;
+        }
+        let target_start = marker_start + marker.len();
+        let Some(target_end) = content[target_start..].find(')') else {
+            break;
+        };
+        let label = content[label_start + 1..marker_start].trim();
+        let target = content[target_start..target_start + target_end]
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !label.is_empty() && !target.is_empty() {
+            found.push((label_start, label.to_owned(), Some(target.to_owned())));
+        }
+        search_from = target_start + target_end + 1;
+    }
+    found.sort_by_key(|item| item.0);
+    found
+        .into_iter()
+        .map(|(_, label, target)| (label, target))
+        .collect()
 }
 fn serialize_markdown(page: &Page) -> String {
     let kind = match page.kind {
@@ -657,9 +691,42 @@ mod tests {
     #[test]
     fn links_are_extracted() {
         assert_eq!(
-            extract_link_tokens("[[A]] and [[ B ]]."),
-            vec![("A".into(), None), ("B".into(), None)]
+            extract_link_tokens("[[A]] and [[ B ]] and [新标题](qingyu://page/page-uuid)."),
+            vec![
+                ("A".into(), None),
+                ("B".into(), None),
+                ("新标题".into(), Some("page-uuid".into()))
+            ]
         );
+    }
+
+    #[test]
+    fn stable_page_links_survive_target_rename_and_move() {
+        let root = std::env::temp_dir().join(format!("qingyu-link-test-{}", Uuid::new_v4()));
+        let repo = PageRepository::open(root.clone()).unwrap();
+        let folder = repo.create("目录".into(), None, String::new()).unwrap();
+        let target = repo.create("旧标题".into(), None, String::new()).unwrap();
+        let source = repo
+            .create(
+                "来源".into(),
+                None,
+                format!("[旧标题](qingyu://page/{})", target.id),
+            )
+            .unwrap();
+
+        assert_eq!(
+            repo.links(&source.id).unwrap()[0].target_id,
+            Some(target.id.clone())
+        );
+        assert_eq!(repo.backlinks(&target.id).unwrap()[0].source_id, source.id);
+        repo.update(&target.id, "新标题".into(), String::new())
+            .unwrap();
+        repo.move_page(&target.id, Some(folder.id), 0).unwrap();
+        assert_eq!(
+            repo.links(&source.id).unwrap()[0].target_id,
+            Some(target.id)
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
