@@ -1,7 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { useInlineAgentStore } from "../../stores/inlineAgentStore";
 
 const storePageAsset = vi.hoisted(() => vi.fn());
 const readPageAsset = vi.hoisted(() => vi.fn());
@@ -25,7 +26,10 @@ function DecorationHarness() {
 }
 
 describe("MarkdownEditor", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    useInlineAgentStore.setState({ candidate: null, error: null });
+  });
 
   it("keeps one editor root and applies external values", async () => {
     const { unmount } = render(<Harness />);
@@ -80,6 +84,21 @@ describe("MarkdownEditor", () => {
     expect(container.querySelector(".qy-blockquote")).toBeInTheDocument();
     expect(container.querySelector(".qy-inline-code")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("img", { name: "示例" })).toHaveAttribute("src", "blob:image"));
+    unmount();
+  });
+
+  it("applies an accepted inline AI candidate exactly once", async () => {
+    const { unmount } = render(<Harness />);
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveTextContent("# 初始"));
+    act(() => useInlineAgentStore.setState({
+      candidate: { pageId: "page-1", action: "rewrite", from: 0, to: 4, original: "# 初始", proposed: "# 改写", status: "ready" },
+      error: null,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "接受" }));
+
+    await waitFor(() => expect(screen.getByRole("textbox")).toHaveTextContent("# 改写"));
+    expect(useInlineAgentStore.getState().candidate).toBeNull();
     unmount();
   });
 });

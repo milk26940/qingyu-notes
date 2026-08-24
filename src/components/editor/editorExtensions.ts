@@ -6,6 +6,7 @@ import { EditorView, keymap } from "@codemirror/view";
 import { pageMentionExtensions, type PageMentionConfig } from "./pageMentions";
 import { blockIdentityExtensions } from "./blockIdentity";
 import { notionDecorations } from "./notionDecorations";
+import type { EditorSelection } from "./InlineAgentMenu";
 
 export const editorTheme = EditorView.theme({
   "&": { height: "100%", fontSize: "calc(15px * var(--qy-font-scale))", color: "var(--qy-ink)" },
@@ -31,6 +32,6 @@ export const editorTheme = EditorView.theme({
   ".qy-image-missing": { display: "grid", placeItems: "center", border: "1px dashed var(--qy-border)", backgroundColor: "var(--qy-bg)" },
 });
 
-export function createEditorExtensions(onChange: (value: string) => void, readOnly = false, mentions?: PageMentionConfig) {
-  return [markdown(), history(), keymap.of([...defaultKeymap, ...historyKeymap]), EditorView.lineWrapping, syntaxHighlighting(defaultHighlightStyle), editorTheme, blockIdentityExtensions, notionDecorations, mentions ? pageMentionExtensions(mentions) : [], EditorState.readOnly.of(readOnly), EditorView.updateListener.of((update) => { if (update.docChanged) onChange(update.state.doc.toString()); })];
+export function createEditorExtensions(onChange: (value: string) => void, readOnly = false, mentions?: PageMentionConfig, onSelectionChange?: (selection: EditorSelection) => void) {
+  return [markdown(), history(), keymap.of([...defaultKeymap, ...historyKeymap]), EditorView.lineWrapping, syntaxHighlighting(defaultHighlightStyle), editorTheme, blockIdentityExtensions, notionDecorations, mentions ? pageMentionExtensions(mentions) : [], EditorState.readOnly.of(readOnly), EditorView.updateListener.of((update) => { if (update.docChanged) onChange(update.state.doc.toString()); if (update.docChanged || update.selectionSet) { const selection = update.state.selection.main; onSelectionChange?.({ from: selection.from, to: selection.to }); } })];
 }

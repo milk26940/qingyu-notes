@@ -8,14 +8,14 @@ const api = vi.hoisted(() => ({
   subscribeConversationEvents: vi.fn(),
   subscribeApprovals: vi.fn(),
   subscribePersistenceErrors: vi.fn(),
-}));
-
-vi.mock("../lib/tauri/conversations", () => ({
-  ...api,
   createConversation: vi.fn(),
   sendConversationMessage: vi.fn(),
   interruptConversation: vi.fn(),
   resolveApproval: vi.fn(),
+}));
+
+vi.mock("../lib/tauri/conversations", () => ({
+  ...api,
 }));
 
 describe("useAgentStore", () => {
@@ -65,5 +65,22 @@ describe("useAgentStore", () => {
       { kind: "diffUpdated", timestamp: "2", data: { diff: "+ 修改" } },
       { kind: "itemCompleted", timestamp: "3", data: { item: { id: "tool-1", status: "completed" } } },
     ])).toEqual({ plan: ["步骤"], diff: "+ 修改", tools: [{ id: "tool-1", status: "completed" }] });
+  });
+
+  it("collects an inline writing response in the matching page conversation", async () => {
+    let eventHandler: (event: any) => void = () => undefined;
+    api.subscribeConversationEvents.mockImplementation(async (handler) => { eventHandler = handler; return () => undefined; });
+    api.sendConversationMessage.mockResolvedValue({ threadId: "thread-1", turnId: "turn-2" });
+    useAgentStore.setState({
+      conversations: [{ id: "conversation-1", threadId: "thread-1", title: "页面写作", scope: { kind: "page", pageId: "page-1" }, createdAt: "1", updatedAt: "2", activeTurnId: null }],
+    });
+
+    const pending = useAgentStore.getState().requestInline("page-1", "规划", "只返回候选正文");
+    await vi.waitFor(() => expect(api.sendConversationMessage).toHaveBeenCalledWith("conversation-1", "只返回候选正文"));
+    eventHandler({ kind: "agentMessageDelta", threadId: "thread-1", turnId: "turn-2", itemId: "item-1", delta: "候选" });
+    eventHandler({ kind: "agentMessageDelta", threadId: "thread-1", turnId: "turn-2", itemId: "item-1", delta: "正文" });
+    eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-2", status: "completed" } });
+
+    await expect(pending).resolves.toBe("候选正文");
   });
 });
