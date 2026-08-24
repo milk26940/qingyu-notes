@@ -1,4 +1,5 @@
 import { Archive, Database, FileText, Inbox, Search, Star, Trash2 } from "lucide-react";
+import { PageTree } from "../pages/PageTree";
 
 const items = [
   [Search, "搜索"], [Inbox, "收件箱"], [Star, "收藏"], [FileText, "页面"], [Database, "数据库"], [Trash2, "回收站"], [Archive, "归档"],
@@ -16,8 +17,7 @@ export function Sidebar() {
           </button>
         ))}
       </nav>
-      <div className="mt-7 px-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--qy-faint)]">我的页面</div>
-      <div className="mt-2 rounded-md border border-dashed border-[var(--qy-border)] px-2 py-3 text-[12px] text-[var(--qy-faint)]">页面系统将在下一阶段接入</div>
+      <PageTree />
     </aside>
   );
 }

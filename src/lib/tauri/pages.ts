@@ -1,0 +1,21 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export type PageKind = "page";
+export type Page = { id: string; title: string; parentId: string | null; kind: PageKind; content: string; createdAt: string; updatedAt: string; trashedAt: string | null; sortOrder: number };
+export type PageSummary = Pick<Page, "id" | "title" | "parentId" | "kind" | "sortOrder" | "trashedAt"> & { path: string };
+export type PageLink = { sourceId: string; targetId: string | null; label: string };
+export type PageHistoryEntry = { id: string; pageId: string; action: string; timestamp: string; title: string; content: string };
+export type SearchResult = { page: PageSummary; snippet: string };
+
+export const initVault = (path?: string) => invoke<string>("vault_init", { path: path ?? null });
+export const listPages = (includeTrash = false) => invoke<PageSummary[]>("page_list", { includeTrash });
+export const getPage = (id: string, includeTrash = false) => invoke<Page>("page_get", { id, includeTrash });
+export const createPage = (title: string, parentId: string | null, content: string) => invoke<Page>("page_create", { title, parentId, content });
+export const updatePage = (id: string, title: string, content: string) => invoke<Page>("page_update", { id, title, content });
+export const movePage = (id: string, parentId: string | null, sortOrder: number) => invoke<Page>("page_move", { id, parentId, sortOrder });
+export const trashPage = (id: string) => invoke<Page>("page_trash", { id });
+export const restorePage = (id: string) => invoke<Page>("page_restore", { id });
+export const getPageHistory = (id: string) => invoke<PageHistoryEntry[]>("page_history", { id });
+export const searchPages = (query: string) => invoke<SearchResult[]>("page_search", { query });
+export const getPageLinks = (id: string) => invoke<PageLink[]>("page_links", { id });
+export const getPageBacklinks = (id: string) => invoke<PageLink[]>("page_backlinks", { id });

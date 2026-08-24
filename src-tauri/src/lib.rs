@@ -1,6 +1,7 @@
 mod codex;
 mod commands;
 mod error;
+mod pages;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -11,14 +12,28 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let runtime = codex::runtime::CodexRuntime::default();
+    let pages = commands::pages::PageState::default();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(runtime)
+        .manage(pages)
         .invoke_handler(tauri::generate_handler![
             greet,
             commands::codex::codex_status,
             commands::codex::codex_start,
-            commands::codex::codex_stop
+            commands::codex::codex_stop,
+            commands::pages::vault_init,
+            commands::pages::page_list,
+            commands::pages::page_get,
+            commands::pages::page_create,
+            commands::pages::page_update,
+            commands::pages::page_move,
+            commands::pages::page_trash,
+            commands::pages::page_restore,
+            commands::pages::page_history,
+            commands::pages::page_search,
+            commands::pages::page_links,
+            commands::pages::page_backlinks
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
