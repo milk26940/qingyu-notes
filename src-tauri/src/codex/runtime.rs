@@ -30,6 +30,12 @@ struct CodexProcess {
     child: Child,
 }
 
+impl Drop for CodexProcess {
+    fn drop(&mut self) {
+        let _ = self.child.start_kill();
+    }
+}
+
 #[derive(Clone)]
 pub struct CodexRuntime {
     status: Arc<RwLock<CodexStatus>>,
