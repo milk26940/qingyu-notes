@@ -6,7 +6,17 @@
   background: #f8fafc;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  --qy-bg: #f8fafc;
+  --qy-sidebar: #f8fafc;
+  --qy-ink: #1f2937;
+  --qy-muted: #667085;
+  --qy-faint: #98a2b3;
+  --qy-border: #e4e7ec;
+  --qy-accent: #2563eb;
 }
 
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
+.icon-button { display: inline-flex; height: 28px; width: 28px; align-items: center; justify-content: center; border-radius: 5px; color: var(--qy-muted); }
+.icon-button:hover { background: #f2f4f7; color: var(--qy-ink); }
+.icon-button:focus-visible { outline: 2px solid var(--qy-accent); outline-offset: 1px; }

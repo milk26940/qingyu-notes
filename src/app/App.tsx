@@ -1,37 +1,14 @@
-import { useState } from "react";
-import reactLogo from "../assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "../App.css";
+import { WorkspaceShell } from "../components/layout/WorkspaceShell";
+import { AgentPanel } from "../components/agent/AgentPanel";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function greet() {
-    setGreetMsg(await invoke("greet", { name }));
-  }
-
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <WorkspaceShell agentPanel={<AgentPanel />}>
+      <div className="flex h-full flex-col">
+        <div className="border-b border-[var(--qy-border)] px-8 py-6"><div className="text-[12px] text-[var(--qy-faint)]">我的笔记库</div><h1 className="mt-2 text-xl font-semibold">开始构建你的知识库</h1></div>
+        <div className="flex flex-1 items-center justify-center text-[13px] text-[var(--qy-muted)]">选择一个页面，或从左侧创建新页面</div>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-      <form className="row" onSubmit={(event) => { event.preventDefault(); void greet(); }}>
-        <input id="greet-input" onChange={(event) => setName(event.currentTarget.value)} placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </WorkspaceShell>
   );
 }
 
