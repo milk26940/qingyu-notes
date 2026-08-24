@@ -7,14 +7,17 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+node_modules/
+dist/
+dist-ssr/
 *.local
 
+.worktrees/
+.superpowers/
+
 # Rust/Tauri build output
-src-tauri/target
-src-tauri/gen
+src-tauri/target/
+src-tauri/gen/
 
 # Editor directories and files
 .vscode/*

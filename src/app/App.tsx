@@ -1,21 +1,19 @@
 import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import reactLogo from "../assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import "../App.css";
 
 function App() {
   const [greetMsg, setGreetMsg] = useState("");
   const [name, setName] = useState("");
 
   async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
     setGreetMsg(await invoke("greet", { name }));
   }
 
   return (
     <main className="container">
       <h1>Welcome to Tauri + React</h1>
-
       <div className="row">
         <a href="https://vite.dev" target="_blank">
           <img src="/vite.svg" className="logo vite" alt="Vite logo" />
@@ -28,19 +26,8 @@ function App() {
         </a>
       </div>
       <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
+      <form className="row" onSubmit={(event) => { event.preventDefault(); void greet(); }}>
+        <input id="greet-input" onChange={(event) => setName(event.currentTarget.value)} placeholder="Enter a name..." />
         <button type="submit">Greet</button>
       </form>
       <p>{greetMsg}</p>
