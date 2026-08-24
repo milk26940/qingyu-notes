@@ -4,7 +4,7 @@ import type { PageSummary } from "../../lib/tauri/pages";
 
 export type PageMentionConfig = {
   getPages: () => PageSummary[];
-  onOpenPage: (id: string) => void;
+  onOpenPage: (id: string, blockId?: string) => void;
   onMissingPage: () => void;
 };
 
@@ -31,11 +31,11 @@ function mentionCompletionSource(getPages: () => PageSummary[]): CompletionSourc
 
 export function pageMentionExtensions(config: PageMentionConfig) {
   const matcher = new MatchDecorator({
-    regexp: /\[[^\]\n]+\]\(qingyu:\/\/page\/([^)#\s]+)(?:#[^)]+)?\)/g,
+    regexp: /\[[^\]\n]+\]\(qingyu:\/\/page\/([^)#\s]+)(?:#([^)]+))?\)/g,
     decoration: (match) => {
       const id = match[1];
       const exists = config.getPages().some((page) => page.id === id);
-      return Decoration.mark({ class: exists ? "qy-page-mention" : "qy-page-mention qy-page-mention-missing", attributes: { "data-page-id": id } });
+      return Decoration.mark({ class: exists ? "qy-page-mention" : "qy-page-mention qy-page-mention-missing", attributes: { "data-page-id": id, ...(match[2] ? { "data-block-id": match[2] } : {}) } });
     },
   });
   const mentionPlugin = ViewPlugin.fromClass(class {
@@ -53,7 +53,7 @@ export function pageMentionExtensions(config: PageMentionConfig) {
         const id = element?.dataset.pageId;
         if (!id) return false;
         event.preventDefault();
-        if (config.getPages().some((page) => page.id === id)) config.onOpenPage(id);
+        if (config.getPages().some((page) => page.id === id)) config.onOpenPage(id, element?.dataset.blockId);
         else config.onMissingPage();
         return true;
       },

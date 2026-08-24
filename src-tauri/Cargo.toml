@@ -26,3 +26,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
 sha2 = "0.10"
 zip = { version = "4", default-features = false, features = ["deflate"] }
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

@@ -1,11 +1,12 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MarkdownEditor } from "./MarkdownEditor";
 
 const storePageAsset = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/tauri/pages", () => ({ storePageAsset }));
 const openPage = vi.fn();
+const writeText = vi.fn();
 
 function Harness() {
   const [value, setValue] = useState("# 初始");
@@ -13,11 +14,13 @@ function Harness() {
 }
 
 function LinkHarness() {
-  const [value, setValue] = useState("[项目规划](qingyu://page/page-2)");
+  const [value, setValue] = useState("[项目规划](qingyu://page/page-2#block-2)");
   return <MarkdownEditor value={value} onChange={setValue} onOpenPage={openPage} pages={[{ id: "page-2", title: "项目规划", parentId: null, kind: "page", sortOrder: 0, trashedAt: null, path: "项目规划.md" }]} />;
 }
 
 describe("MarkdownEditor", () => {
+  afterEach(cleanup);
+
   it("keeps one editor root and applies external values", async () => {
     const { unmount } = render(<Harness />);
     expect(screen.getByLabelText("Markdown 编辑器").querySelector(".cm-editor")).toBeInTheDocument();
@@ -44,7 +47,18 @@ describe("MarkdownEditor", () => {
 
     fireEvent.click(container.querySelector(".qy-page-mention") as Element);
 
-    expect(openPage).toHaveBeenCalledWith("page-2");
+    expect(openPage).toHaveBeenCalledWith("page-2", "block-2");
+    unmount();
+  });
+
+  it("copies a stable link for the current block", async () => {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    writeText.mockResolvedValue(undefined);
+    const { unmount } = render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "复制当前区块链接" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringMatching(/^qingyu:\/\/page\/page-1#[0-9a-f-]{36}$/)));
     unmount();
   });
 });
