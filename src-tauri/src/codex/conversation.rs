@@ -15,8 +15,14 @@ use crate::error::AppError;
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ConversationScope {
     Vault,
-    Page { page_id: String },
-    Database { database_id: String },
+    Page {
+        #[serde(rename = "pageId", alias = "page_id")]
+        page_id: String,
+    },
+    Database {
+        #[serde(rename = "databaseId", alias = "database_id")]
+        database_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -417,6 +423,31 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn conversation_scope_accepts_camel_and_legacy_fields() {
+        let current_page: ConversationScope =
+            serde_json::from_value(json!({ "kind": "page", "pageId": "page-1" })).unwrap();
+        let legacy_page: ConversationScope =
+            serde_json::from_value(json!({ "kind": "page", "page_id": "page-1" })).unwrap();
+        assert_eq!(current_page, legacy_page);
+        assert_eq!(
+            serde_json::to_value(current_page).unwrap()["pageId"],
+            "page-1"
+        );
+
+        let current_database: ConversationScope =
+            serde_json::from_value(json!({ "kind": "database", "databaseId": "database-1" }))
+                .unwrap();
+        let legacy_database: ConversationScope =
+            serde_json::from_value(json!({ "kind": "database", "database_id": "database-1" }))
+                .unwrap();
+        assert_eq!(current_database, legacy_database);
+        assert_eq!(
+            serde_json::to_value(current_database).unwrap()["databaseId"],
+            "database-1"
+        );
+    }
 
     #[test]
     fn stores_metadata_and_visible_records_only() {

@@ -1,4 +1,4 @@
-import { Bot, Check, LoaderCircle, MessageSquarePlus, PanelRightClose, RotateCw, Send, Square, X } from "lucide-react";
+import { Bot, Check, History, LoaderCircle, MessageSquarePlus, PanelRightClose, RotateCw, Send, Square, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { ConversationScope } from "../../lib/tauri/conversations";
 import { useAgentStore } from "../../stores/agentStore";
@@ -19,6 +19,16 @@ function visibleMessages(records: ReturnType<typeof useAgentStore.getState>["rec
   return messages;
 }
 
+function scopeLabel(scope: ConversationScope) {
+  if (scope.kind === "page") return "当前页面";
+  if (scope.kind === "database") return "当前数据库";
+  return "整个笔记库";
+}
+
+function conversationTime(value: string) {
+  return new Date(Number(value) * 1000).toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 export function AgentPanel() {
   const status = useCodexStore((state) => state.status);
   const connect = useCodexStore((state) => state.connect);
@@ -29,6 +39,7 @@ export function AgentPanel() {
   const { conversations, activeId, records, plan, diff, tools, approvals, sending, error, initialize, create, open, send, interrupt, resolveApproval } = useAgentStore();
   const [prompt, setPrompt] = useState("");
   const [scopeKind, setScopeKind] = useState<ConversationScope["kind"]>("page");
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -52,12 +63,12 @@ export function AgentPanel() {
     return { kind: "vault" };
   }, [activePage, scopeKind]);
   const messages = visibleMessages(records);
+  const sortedConversations = useMemo(() => [...conversations].sort((left, right) => Number(right.updatedAt) - Number(left.updatedAt)), [conversations]);
   const ready = status.state === "ready";
   const submit = () => { const text = prompt.trim(); if (!text || !ready || sending) return; setPrompt(""); void send(text, scope); };
 
   return <aside className="flex min-h-0 flex-col bg-[var(--qy-sidebar)]" aria-label="Agent 面板">
-    <div className="flex h-10 items-center justify-between border-b border-[var(--qy-border)] px-3"><div className="flex items-center gap-2 text-[13px] font-medium"><Bot size={16} />Agent</div><div className="flex items-center gap-1"><button className="icon-button" title="新建对话" aria-label="新建对话" onClick={() => void create(scope)}><MessageSquarePlus size={15} /></button><button className="icon-button" title="关闭 Agent 面板" aria-label="关闭 Agent 面板" onClick={toggleAgentPanel}><PanelRightClose size={16} /></button></div></div>
-    <div className="flex items-center gap-1 overflow-x-auto border-b border-[var(--qy-border)] px-2 py-1">{conversations.map((conversation) => <button key={conversation.id} type="button" onClick={() => void open(conversation.id)} className={`max-w-32 shrink-0 truncate rounded-md px-2 py-1 text-[11px] ${conversation.id === activeId ? "bg-white text-[var(--qy-ink)]" : "text-[var(--qy-muted)] hover:bg-white"}`}>{conversation.title}</button>)}</div>
+    <div className="relative flex h-10 items-center justify-between border-b border-[var(--qy-border)] px-3"><div className="flex min-w-0 items-center gap-2 text-[13px] font-medium"><Bot size={16} /><span className="shrink-0">Agent</span>{activeId && <span className="truncate text-[11px] font-normal text-[var(--qy-faint)]">{conversations.find((item) => item.id === activeId)?.title}</span>}</div><div className="flex items-center gap-1"><button className="icon-button" title="历史对话" aria-label="历史对话" aria-expanded={historyOpen} onClick={() => setHistoryOpen((value) => !value)}><History size={15} /></button><button className="icon-button" title="新建对话" aria-label="新建对话" onClick={() => void create(scope)}><MessageSquarePlus size={15} /></button><button className="icon-button" title="关闭 Agent 面板" aria-label="关闭 Agent 面板" onClick={toggleAgentPanel}><PanelRightClose size={16} /></button></div>{historyOpen && <div className="absolute right-2 top-9 z-20 max-h-80 w-[min(320px,calc(100vw-32px))] overflow-y-auto rounded-md border border-[var(--qy-border)] bg-white p-1 shadow-lg" aria-label="历史对话列表">{sortedConversations.length ? sortedConversations.map((conversation) => <button key={conversation.id} type="button" aria-label={`打开 ${conversation.title}`} onClick={() => { setHistoryOpen(false); void open(conversation.id); }} className={`flex w-full items-center justify-between gap-3 rounded px-2 py-2 text-left hover:bg-[var(--qy-bg)] ${conversation.id === activeId ? "bg-[var(--qy-bg)]" : ""}`}><span className="min-w-0"><span className="block truncate text-[12px] text-[var(--qy-ink)]">{conversation.title}</span><span className="mt-0.5 block text-[10px] text-[var(--qy-faint)]">{scopeLabel(conversation.scope)} · {conversationTime(conversation.updatedAt)}</span></span>{conversation.id === activeId && <Check className="shrink-0 text-[var(--qy-accent)]" size={14} />}</button>) : <div className="px-3 py-6 text-center text-[11px] text-[var(--qy-faint)]">暂无历史对话</div>}</div>}</div>
     <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
       {!ready && <div className="flex h-full flex-col items-center justify-center text-center text-[13px] text-[var(--qy-muted)]">{status.state === "starting" ? <LoaderCircle className="mb-3 animate-spin" size={22} /> : <Bot className="mb-3 text-[var(--qy-faint)]" size={24} />}<p>{status.state === "failed" ? status.message : status.state === "starting" ? "正在连接本机 Codex" : "Codex 未连接"}</p>{status.state === "failed" && <button className="mt-3 inline-flex items-center gap-1 text-[var(--qy-accent)]" onClick={() => void connect()}><RotateCw size={13}/>重新连接</button>}</div>}
       {ready && messages.length === 0 && <div className="grid h-full place-items-center text-center text-[12px] text-[var(--qy-faint)]"><div><Bot className="mx-auto mb-2" size={22}/><p>选择上下文后开始对话</p></div></div>}
