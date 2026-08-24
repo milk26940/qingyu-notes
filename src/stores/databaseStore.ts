@@ -19,6 +19,7 @@ type DatabaseStore = {
   updateRecord: (record: Page, title: string, properties: Record<string, unknown>) => Promise<void>;
   setFilters: (filters: DatabaseFilter[]) => Promise<void>;
   setSorts: (sorts: DatabaseSort[]) => Promise<void>;
+  refreshExternalChange: () => Promise<void>;
 };
 
 const message = (error: unknown) => typeof error === "object" && error && "message" in error ? String(error.message) : String(error);
@@ -32,4 +33,5 @@ export const useDatabaseStore = create<DatabaseStore>((set, get) => ({
   updateRecord: async (record, title, properties) => { const databaseId = get().bundle?.page.id; if (!databaseId) return; try { const updated = await api.updateDatabaseRecord(databaseId, record.id, title, properties); set((state) => ({ records: state.records.map((item) => item.id === updated.id ? updated : item), error: null })); await usePagesStore.getState().refresh(); } catch (error) { set({ error: message(error) }); } },
   setFilters: async (filters) => { set({ filters }); const id = get().bundle?.page.id; if (id) set({ records: await api.queryDatabase(id, filters, get().sorts) }); },
   setSorts: async (sorts) => { set({ sorts }); const id = get().bundle?.page.id; if (id) set({ records: await api.queryDatabase(id, get().filters, sorts) }); },
+  refreshExternalChange: async () => { const id = get().bundle?.page.id; if (id) await get().open(id); },
 }));

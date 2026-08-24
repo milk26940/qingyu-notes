@@ -22,7 +22,7 @@ const asError = (error: unknown): CodexError => {
   return { code: "codex_unknown_error", message: String(error) };
 };
 
-export const useCodexStore = create<CodexStore>((set) => ({
+export const useCodexStore = create<CodexStore>((set, get) => ({
   status: { state: "stopped" },
   connect: async () => {
     set({ status: { state: "starting" } });
@@ -42,7 +42,12 @@ export const useCodexStore = create<CodexStore>((set) => ({
     }
   },
   subscribe: async () => {
-    const unlisten = await subscribeCodexStatus((status) => set({ status }));
+    const unlisten = await subscribeCodexStatus((status) => {
+      set({ status });
+      if (status.state === "failed" && status.code === "codex_disconnected") {
+        window.setTimeout(() => { if (get().status.state === "failed") void get().connect(); }, 1500);
+      }
+    });
     return unlisten;
   },
 }));

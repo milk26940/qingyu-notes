@@ -40,7 +40,14 @@ pub fn run() {
             commands::database::database_add_field,
             commands::database::database_create_record,
             commands::database::database_update_record,
-            commands::database::database_query
+            commands::database::database_query,
+            commands::conversations::conversation_create,
+            commands::conversations::conversation_list,
+            commands::conversations::conversation_history,
+            commands::conversations::conversation_send,
+            commands::conversations::conversation_interrupt,
+            commands::conversations::approval_list,
+            commands::conversations::approval_resolve
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

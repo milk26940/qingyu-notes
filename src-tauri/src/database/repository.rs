@@ -21,6 +21,7 @@ pub struct DatabaseRepository {
 }
 
 impl DatabaseRepository {
+    #[cfg(test)]
     pub fn open(root: PathBuf) -> Result<Self, AppError> {
         let pages = PageRepository::open(root)?;
         Self::from_pages(pages)

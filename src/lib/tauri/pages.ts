@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type PageKind = "page" | "database" | "databaseRecord";
 export type Page = { id: string; title: string; parentId: string | null; kind: PageKind; databaseId?: string | null; properties?: Record<string, unknown>; content: string; createdAt: string; updatedAt: string; trashedAt: string | null; sortOrder: number };
@@ -6,6 +7,7 @@ export type PageSummary = Pick<Page, "id" | "title" | "parentId" | "kind" | "sor
 export type PageLink = { sourceId: string; targetId: string | null; label: string };
 export type PageHistoryEntry = { id: string; pageId: string; action: string; timestamp: string; title: string; content: string };
 export type SearchResult = { page: PageSummary; snippet: string };
+export type VaultChange = { source: "agent"; namespace: string; tool: string; pageIds: string[]; databaseIds: string[] };
 
 export const initVault = (path?: string) => invoke<string>("vault_init", { path: path ?? null });
 export const listPages = (includeTrash = false) => invoke<PageSummary[]>("page_list", { includeTrash });
@@ -19,3 +21,4 @@ export const getPageHistory = (id: string) => invoke<PageHistoryEntry[]>("page_h
 export const searchPages = (query: string) => invoke<SearchResult[]>("page_search", { query });
 export const getPageLinks = (id: string) => invoke<PageLink[]>("page_links", { id });
 export const getPageBacklinks = (id: string) => invoke<PageLink[]>("page_backlinks", { id });
+export const subscribeVaultChanges = (handler: (change: VaultChange) => void): Promise<UnlistenFn> => listen<VaultChange>("vault://changed", (event) => handler(event.payload));

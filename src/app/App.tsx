@@ -5,10 +5,21 @@ import { PageToolbar } from "../components/pages/PageToolbar";
 import { useEffect } from "react";
 import { usePagesStore } from "../stores/pagesStore";
 import { DatabaseTable } from "../components/database/DatabaseTable";
+import { subscribeVaultChanges } from "../lib/tauri/pages";
+import { useDatabaseStore } from "../stores/databaseStore";
 
 function App() {
   const { activePage, init, edit, editTitle, searchQuery, searchResults, open } = usePagesStore();
   useEffect(() => { void init(); }, [init]);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void subscribeVaultChanges((change) => {
+      void usePagesStore.getState().handleExternalChange(change);
+      void useDatabaseStore.getState().refreshExternalChange();
+    }).then((cleanup) => { if (disposed) cleanup(); else unlisten = cleanup; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
   return (
     <WorkspaceShell agentPanel={<AgentPanel />}>
       <div className="flex h-full flex-col">
