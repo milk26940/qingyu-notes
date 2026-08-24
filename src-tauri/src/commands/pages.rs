@@ -25,7 +25,7 @@ pub async fn vault_init(
     Ok(root.to_string_lossy().to_string())
 }
 
-async fn repo(state: &State<'_, PageState>) -> Result<PageRepository, AppError> {
+pub(crate) async fn repo(state: &State<'_, PageState>) -> Result<PageRepository, AppError> {
     state
         .repository
         .lock()

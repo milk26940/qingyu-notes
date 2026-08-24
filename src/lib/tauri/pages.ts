@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type PageKind = "page";
-export type Page = { id: string; title: string; parentId: string | null; kind: PageKind; content: string; createdAt: string; updatedAt: string; trashedAt: string | null; sortOrder: number };
+export type PageKind = "page" | "database" | "databaseRecord";
+export type Page = { id: string; title: string; parentId: string | null; kind: PageKind; databaseId?: string | null; properties?: Record<string, unknown>; content: string; createdAt: string; updatedAt: string; trashedAt: string | null; sortOrder: number };
 export type PageSummary = Pick<Page, "id" | "title" | "parentId" | "kind" | "sortOrder" | "trashedAt"> & { path: string };
 export type PageLink = { sourceId: string; targetId: string | null; label: string };
 export type PageHistoryEntry = { id: string; pageId: string; action: string; timestamp: string; title: string; content: string };

@@ -1,9 +1,16 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
 pub enum PageKind {
+    #[serde(rename = "page")]
     Page,
+    #[serde(rename = "database")]
+    Database,
+    #[serde(rename = "databaseRecord")]
+    DatabaseRecord,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -18,6 +25,9 @@ pub struct Page {
     pub updated_at: String,
     pub trashed_at: Option<String>,
     pub sort_order: i64,
+    #[serde(default)]
+    pub properties: BTreeMap<String, Value>,
+    pub database_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

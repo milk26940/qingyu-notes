@@ -1,5 +1,6 @@
 mod codex;
 mod commands;
+mod database;
 mod error;
 mod pages;
 
@@ -33,7 +34,13 @@ pub fn run() {
             commands::pages::page_history,
             commands::pages::page_search,
             commands::pages::page_links,
-            commands::pages::page_backlinks
+            commands::pages::page_backlinks,
+            commands::database::database_create,
+            commands::database::database_get,
+            commands::database::database_add_field,
+            commands::database::database_create_record,
+            commands::database::database_update_record,
+            commands::database::database_query
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
 use uuid::Uuid;
 
 use super::model::{Page, PageHistoryEntry, PageKind, PageLink, PageSummary, SearchResult};
@@ -34,6 +36,10 @@ impl PageRepository {
         )
         .map_err(|e| AppError::new("vault_init_failed", e.to_string()))?;
         Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn list(&self, include_trash: bool) -> Result<Vec<PageSummary>, AppError> {
@@ -103,6 +109,25 @@ impl PageRepository {
         parent_id: Option<String>,
         content: String,
     ) -> Result<Page, AppError> {
+        self.create_typed(
+            title,
+            parent_id,
+            content,
+            PageKind::Page,
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn create_typed(
+        &self,
+        title: String,
+        parent_id: Option<String>,
+        content: String,
+        kind: PageKind,
+        database_id: Option<String>,
+        properties: BTreeMap<String, Value>,
+    ) -> Result<Page, AppError> {
         if let Some(parent) = parent_id.as_deref() {
             let _ = self.get(parent, false)?;
         }
@@ -111,16 +136,39 @@ impl PageRepository {
             id: Uuid::new_v4().to_string(),
             title,
             parent_id,
-            kind: PageKind::Page,
+            kind,
             content,
             created_at: now.clone(),
             updated_at: now,
             trashed_at: None,
             sort_order: 0,
+            properties,
+            database_id,
         };
         let path = self.path_for(&page)?;
         self.write_atomic(&path, &page)?;
         self.record(&page, "create")?;
+        Ok(page)
+    }
+
+    pub fn update_properties(
+        &self,
+        id: &str,
+        title: String,
+        properties: BTreeMap<String, Value>,
+    ) -> Result<Page, AppError> {
+        let mut page = self.get(id, false)?;
+        self.record(&page, "before_update_properties")?;
+        let old_path = self.find_path(id)?;
+        page.title = title;
+        page.properties = properties;
+        page.updated_at = now();
+        let new_path = self.path_for(&page)?;
+        self.write_atomic(&new_path, &page)?;
+        if old_path != new_path {
+            let _ = fs::remove_file(&old_path);
+        }
+        self.record(&page, "update_properties")?;
         Ok(page)
     }
 
@@ -492,7 +540,13 @@ fn extract_link_tokens(content: &str) -> Vec<(String, Option<String>)> {
     out
 }
 fn serialize_markdown(page: &Page) -> String {
-    format!("---\nid: {}\ntitle: {}\nparent_id: {}\nkind: page\ncreated_at: {}\nupdated_at: {}\ntrashed_at: {}\nsort_order: {}\n---\n{}", page.id, page.title.replace('\n', " "), page.parent_id.as_deref().unwrap_or(""), page.created_at, page.updated_at, page.trashed_at.as_deref().unwrap_or(""), page.sort_order, page.content)
+    let kind = match page.kind {
+        PageKind::Page => "page",
+        PageKind::Database => "database",
+        PageKind::DatabaseRecord => "databaseRecord",
+    };
+    let properties = serde_json::to_string(&page.properties).unwrap_or_else(|_| "{}".to_owned());
+    format!("---\nid: {}\ntitle: {}\nparent_id: {}\nkind: {}\ncreated_at: {}\nupdated_at: {}\ntrashed_at: {}\nsort_order: {}\ndatabase_id: {}\nproperties: {}\n---\n{}", page.id, page.title.replace('\n', " "), page.parent_id.as_deref().unwrap_or(""), kind, page.created_at, page.updated_at, page.trashed_at.as_deref().unwrap_or(""), page.sort_order, page.database_id.as_deref().unwrap_or(""), properties, page.content)
 }
 fn parse_markdown(text: &str) -> Result<Page, AppError> {
     let (front, content) = text
@@ -518,7 +572,11 @@ fn parse_markdown(text: &str) -> Result<Page, AppError> {
             .get("parent_id")
             .filter(|v| !v.is_empty())
             .map(|v| (*v).to_owned()),
-        kind: PageKind::Page,
+        kind: match fields.get("kind").copied().unwrap_or("page") {
+            "database" => PageKind::Database,
+            "databaseRecord" => PageKind::DatabaseRecord,
+            _ => PageKind::Page,
+        },
         content: content.to_owned(),
         created_at: required("created_at")?.to_owned(),
         updated_at: required("updated_at")?.to_owned(),
@@ -530,6 +588,14 @@ fn parse_markdown(text: &str) -> Result<Page, AppError> {
             .get("sort_order")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
+        properties: fields
+            .get("properties")
+            .and_then(|value| serde_json::from_str(value).ok())
+            .unwrap_or_default(),
+        database_id: fields
+            .get("database_id")
+            .filter(|value| !value.is_empty())
+            .map(|value| (*value).to_owned()),
     })
 }
 
