@@ -135,7 +135,8 @@ impl PageRepository {
         let new_path = self.path_for(&page)?;
         self.write_atomic(&new_path, &page)?;
         if old_path != new_path {
-            let _ = fs::remove_file(old_path);
+            let _ = fs::remove_file(&old_path);
+            self.rename_child_directory(&old_path, &new_path, &old_title, &page.title)?;
         }
         if old_title != page.title {
             self.rewrite_links(id, &old_title, &page.title)?;
@@ -168,7 +169,8 @@ impl PageRepository {
         let new_path = self.path_for(&page)?;
         self.write_atomic(&new_path, &page)?;
         if old_path != new_path {
-            let _ = fs::remove_file(old_path);
+            let _ = fs::remove_file(&old_path);
+            self.rename_child_directory(&old_path, &new_path, &page.title, &page.title)?;
         }
         self.record(&page, "move")?;
         Ok(page)
@@ -419,6 +421,28 @@ impl PageRepository {
         }
         Ok(())
     }
+
+    fn rename_child_directory(
+        &self,
+        old_path: &Path,
+        new_path: &Path,
+        old_title: &str,
+        new_title: &str,
+    ) -> Result<(), AppError> {
+        let old_dir = old_path
+            .parent()
+            .unwrap_or(&self.root)
+            .join(safe_name(old_title));
+        let new_dir = new_path
+            .parent()
+            .unwrap_or(&self.root)
+            .join(safe_name(new_title));
+        if old_dir.exists() && old_dir != new_dir && !new_dir.exists() {
+            fs::rename(old_dir, new_dir)
+                .map_err(|e| AppError::new("page_move_failed", e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 fn now() -> String {
@@ -536,6 +560,7 @@ mod tests {
             .update(&child.id, "记录2".into(), "更新".into())
             .unwrap();
         assert_eq!(updated.id, child.id);
+        assert!(root.join("项目").join("记录2.md").exists());
         assert!(repo
             .search("更新")
             .unwrap()
