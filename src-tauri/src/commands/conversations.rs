@@ -36,6 +36,25 @@ fn scope_instruction(scope: &ConversationScope) -> String {
     format!("你运行在轻羽笔记软件中。{} 所有笔记业务读取和写入只能使用轻羽提供的 page、database、relation 动态工具；不得用 shell 或原始文件写入绕过历史、审批与索引。", focus)
 }
 
+fn resumable_thread_id(
+    thread_id: String,
+    resume_result: Result<(), AppError>,
+) -> Result<Option<String>, AppError> {
+    match resume_result {
+        Ok(()) => Ok(Some(thread_id)),
+        Err(error) => {
+            let message = error.message.to_lowercase();
+            if message.contains("no rollout found for thread id")
+                || message.contains("thread not found")
+            {
+                Ok(None)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn conversation_create(
     app: AppHandle,
@@ -85,11 +104,15 @@ pub async fn conversation_send(
     let root = repository.root().to_path_buf();
     let store = setup(&app, &pages, &runtime).await?;
     let conversation = store.get(&id)?;
-    let thread_id = match conversation.thread_id {
+    let resumable_thread = match conversation.thread_id {
         Some(thread_id) => {
-            runtime.resume_thread(&thread_id).await?;
-            thread_id
+            let resume_result = runtime.resume_thread(&thread_id).await;
+            resumable_thread_id(thread_id, resume_result)?
         }
+        None => None,
+    };
+    let thread_id = match resumable_thread {
+        Some(thread_id) => thread_id,
         None => {
             let thread_id = runtime
                 .start_thread(&root, &scope_instruction(&conversation.scope))
@@ -128,4 +151,21 @@ pub async fn approval_resolve(
     approved: bool,
 ) -> Result<(), AppError> {
     runtime.resolve_approval(&app, &id, approved).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_rollout_replaces_the_stale_thread() {
+        let missing = AppError::new("codex_rpc_error", "no rollout found for thread id 01a033e9");
+        assert_eq!(
+            resumable_thread_id("old-thread".into(), Err(missing)).unwrap(),
+            None
+        );
+
+        let retained = resumable_thread_id("old-thread".into(), Ok(())).unwrap();
+        assert_eq!(retained.as_deref(), Some("old-thread"));
+    }
 }

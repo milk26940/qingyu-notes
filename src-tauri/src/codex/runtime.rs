@@ -13,6 +13,8 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 
+#[cfg(windows)]
+use super::command::codex_creation_flags;
 use super::command::resolve_codex_launch;
 use super::conversation::ConversationStore;
 use super::protocol::{
@@ -159,6 +161,8 @@ impl CodexRuntime {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(codex_creation_flags());
         let mut child = command
             .spawn()
             .map_err(|error| AppError::new("codex_start_failed", error.to_string()))?;

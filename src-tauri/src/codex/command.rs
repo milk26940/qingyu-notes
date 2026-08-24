@@ -3,6 +3,11 @@ use std::process::Command;
 
 use crate::error::AppError;
 
+#[cfg(windows)]
+pub const fn codex_creation_flags() -> u32 {
+    0x0800_0000
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexLaunch {
     pub program: PathBuf,
@@ -34,8 +39,14 @@ impl CodexLaunch {
 
 pub fn resolve_codex_launch() -> Result<CodexLaunch, AppError> {
     for candidate in ["codex.exe", "codex.cmd"] {
-        let output = Command::new("where.exe")
-            .arg(candidate)
+        let mut command = Command::new("where.exe");
+        command.arg(candidate);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(codex_creation_flags());
+        }
+        let output = command
             .output()
             .map_err(|error| AppError::new("codex_discovery_failed", error.to_string()))?;
         if output.status.success() {
@@ -73,5 +84,11 @@ mod tests {
         let launch = CodexLaunch::from_path(PathBuf::from(r"C:\tools\codex.cmd"));
         assert_eq!(launch.program, PathBuf::from("cmd.exe"));
         assert_eq!(&launch.prefix_args[0..3], ["/D", "/S", "/C"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_children_do_not_create_a_console_window() {
+        assert_eq!(codex_creation_flags(), 0x0800_0000);
     }
 }
