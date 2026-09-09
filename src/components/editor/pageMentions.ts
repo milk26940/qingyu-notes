@@ -1,5 +1,5 @@
 import { autocompletion, type CompletionContext, type CompletionSource } from "@codemirror/autocomplete";
-import { Decoration, EditorView, MatchDecorator, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
+import { Decoration, EditorView, MatchDecorator, ViewPlugin, WidgetType, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import type { PageSummary } from "../../lib/tauri/pages";
 
 export type PageMentionConfig = {
@@ -7,6 +7,24 @@ export type PageMentionConfig = {
   onOpenPage: (id: string, blockId?: string) => void;
   onMissingPage: () => void;
 };
+
+class PageMentionWidget extends WidgetType {
+  constructor(private label: string, private id: string, private blockId: string | undefined, private missing: boolean, private config: PageMentionConfig) { super(); }
+  eq(other: PageMentionWidget) { return this.label === other.label && this.id === other.id && this.blockId === other.blockId && this.missing === other.missing; }
+  toDOM() {
+    const element = document.createElement("strong");
+    element.className = this.missing ? "qy-page-mention qy-page-mention-missing" : "qy-page-mention";
+    element.dataset.pageId = this.id;
+    if (this.blockId) element.dataset.blockId = this.blockId;
+    element.textContent = this.label;
+    element.addEventListener("click", (event) => {
+      event.preventDefault();
+      if (this.missing) this.config.onMissingPage();
+      else this.config.onOpenPage(this.id, this.blockId);
+    });
+    return element;
+  }
+}
 
 function mentionMarkdown(page: PageSummary) {
   const label = page.title.replace(/[\[\]]/g, "").trim() || "未命名页面";
@@ -31,11 +49,11 @@ function mentionCompletionSource(getPages: () => PageSummary[]): CompletionSourc
 
 export function pageMentionExtensions(config: PageMentionConfig) {
   const matcher = new MatchDecorator({
-    regexp: /\[[^\]\n]+\]\(qingyu:\/\/page\/([^)#\s]+)(?:#([^)]+))?\)/g,
+    regexp: /\[([^\]\n]+)\]\(qingyu:\/\/page\/([^)#\s]+)(?:#([^)]+))?\)/g,
     decoration: (match) => {
-      const id = match[1];
+      const id = match[2];
       const exists = config.getPages().some((page) => page.id === id);
-      return Decoration.mark({ class: exists ? "qy-page-mention" : "qy-page-mention qy-page-mention-missing", attributes: { "data-page-id": id, ...(match[2] ? { "data-block-id": match[2] } : {}) } });
+      return Decoration.replace({ widget: new PageMentionWidget(match[1], id, match[3], !exists, config) });
     },
   });
   const mentionPlugin = ViewPlugin.fromClass(class {

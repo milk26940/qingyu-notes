@@ -1,8 +1,10 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
+#[cfg(test)]
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -12,12 +14,12 @@ use super::model::{
 };
 use crate::error::AppError;
 use crate::pages::model::{Page, PageKind};
-use crate::pages::repository::PageRepository;
+use crate::pages::repository::{shared_vault_lock, PageRepository};
 
 #[derive(Clone)]
 pub struct DatabaseRepository {
     pages: PageRepository,
-    definitions_dir: PathBuf,
+    vault_lock: Arc<Mutex<()>>,
 }
 
 impl DatabaseRepository {
@@ -28,12 +30,10 @@ impl DatabaseRepository {
     }
 
     pub fn from_pages(pages: PageRepository) -> Result<Self, AppError> {
-        let definitions_dir = pages.root().join(".noteapp").join("databases");
-        fs::create_dir_all(&definitions_dir)
-            .map_err(|error| AppError::new("database_init_failed", error.to_string()))?;
+        let vault_lock = shared_vault_lock(pages.root());
         Ok(Self {
             pages,
-            definitions_dir,
+            vault_lock,
         })
     }
 
@@ -42,33 +42,31 @@ impl DatabaseRepository {
         title: String,
         parent_id: Option<String>,
     ) -> Result<(Page, DatabaseDefinition), AppError> {
-        let page = self.pages.create_typed(
-            title,
-            parent_id,
-            String::new(),
-            PageKind::Database,
-            None,
-            BTreeMap::new(),
-        )?;
-        let timestamp = timestamp();
-        let definition = DatabaseDefinition {
-            id: page.id.clone(),
-            page_id: page.id.clone(),
-            fields: Vec::new(),
-            views: default_views(),
-            created_at: timestamp.clone(),
-            updated_at: timestamp,
-        };
-        self.write_definition(&definition)?;
-        Ok((page, definition))
+        self.create_database_with_hook(title, parent_id, |_| {})
+    }
+
+    fn create_database_with_hook<F>(
+        &self,
+        title: String,
+        parent_id: Option<String>,
+        after_page_created: F,
+    ) -> Result<(Page, DatabaseDefinition), AppError>
+    where
+        F: FnOnce(&Page),
+    {
+        self.pages.with_transaction(|transaction| {
+            let page = self.pages.create_typed_tx(transaction, title, parent_id, String::new(), PageKind::Database, None, BTreeMap::new())?;
+            after_page_created(&page);
+            let timestamp = timestamp();
+            let definition = DatabaseDefinition { id: page.id.clone(), page_id: page.id.clone(), fields: Vec::new(), views: default_views(), created_at: timestamp.clone(), updated_at: timestamp };
+            write_definition_tx(transaction, &definition, &page.title)?;
+            Ok((page, definition))
+        })
     }
 
     pub fn get(&self, id: &str) -> Result<DatabaseDefinition, AppError> {
-        let path = self.definition_path(id);
-        let text = fs::read_to_string(path)
-            .map_err(|error| AppError::new("database_not_found", error.to_string()))?;
-        serde_json::from_str(&text)
-            .map_err(|error| AppError::new("database_invalid_definition", error.to_string()))
+        self.read_definition_sqlite(id)?
+            .ok_or_else(|| AppError::new("database_not_found", "数据库不存在"))
     }
 
     pub fn add_field(
@@ -78,7 +76,37 @@ impl DatabaseRepository {
         field_type: DatabaseFieldType,
         options: Vec<String>,
     ) -> Result<DatabaseField, AppError> {
+        let _guard = self.lock_vault()?;
         let mut definition = self.get(database_id)?;
+        self.add_field_unlocked(&mut definition, name, field_type, options)
+    }
+
+    pub fn add_field_checked(
+        &self,
+        database_id: &str,
+        expected: &DatabaseDefinition,
+        name: String,
+        field_type: DatabaseFieldType,
+        options: Vec<String>,
+    ) -> Result<DatabaseField, AppError> {
+        let _guard = self.lock_vault()?;
+        let mut definition = self.get(database_id)?;
+        if &definition != expected {
+            return Err(AppError::new(
+                "approval_stale_data",
+                "数据库结构在审批期间已发生变化，请重新发起操作",
+            ));
+        }
+        self.add_field_unlocked(&mut definition, name, field_type, options)
+    }
+
+    fn add_field_unlocked(
+        &self,
+        definition: &mut DatabaseDefinition,
+        name: String,
+        field_type: DatabaseFieldType,
+        options: Vec<String>,
+    ) -> Result<DatabaseField, AppError> {
         if name.trim().is_empty() {
             return Err(AppError::new("database_invalid_field", "字段名称不能为空"));
         }
@@ -91,7 +119,7 @@ impl DatabaseRepository {
         };
         definition.fields.push(field.clone());
         definition.updated_at = timestamp();
-        self.write_definition(&definition)?;
+        self.write_definition_unlocked(definition)?;
         Ok(field)
     }
 
@@ -103,14 +131,11 @@ impl DatabaseRepository {
     ) -> Result<Page, AppError> {
         let definition = self.get(database_id)?;
         self.validate_properties(&definition, &properties)?;
-        self.pages.create_typed(
-            title,
-            Some(definition.page_id),
-            String::new(),
-            PageKind::DatabaseRecord,
-            Some(definition.id),
-            properties,
-        )
+        self.pages.with_transaction(|transaction| {
+            let page = self.pages.create_typed_tx(transaction, title, Some(definition.page_id), String::new(), PageKind::DatabaseRecord, Some(definition.id), properties.clone())?;
+            write_record_values_tx(transaction, &page, &properties)?;
+            Ok(page)
+        })
     }
 
     pub fn update_record(
@@ -120,8 +145,36 @@ impl DatabaseRepository {
         title: String,
         properties: BTreeMap<String, Value>,
     ) -> Result<Page, AppError> {
+        self.update_record_unlocked(database_id, record_id, title, properties, None)
+    }
+
+    pub fn update_record_checked(
+        &self,
+        database_id: &str,
+        record_id: &str,
+        title: String,
+        properties: BTreeMap<String, Value>,
+        expected: &Page,
+    ) -> Result<Page, AppError> {
+        self.update_record_unlocked(database_id, record_id, title, properties, Some(expected))
+    }
+
+    fn update_record_unlocked(
+        &self,
+        database_id: &str,
+        record_id: &str,
+        title: String,
+        properties: BTreeMap<String, Value>,
+        expected: Option<&Page>,
+    ) -> Result<Page, AppError> {
         let definition = self.get(database_id)?;
         let record = self.pages.get(record_id, false)?;
+        if expected.is_some_and(|expected| expected != &record) {
+            return Err(AppError::new(
+                "approval_stale_data",
+                "数据库记录在审批期间已发生变化，请重新发起操作",
+            ));
+        }
         if record.kind != PageKind::DatabaseRecord
             || record.database_id.as_deref() != Some(database_id)
         {
@@ -131,7 +184,11 @@ impl DatabaseRepository {
             ));
         }
         self.validate_properties(&definition, &properties)?;
-        self.pages.update_properties(record_id, title, properties)
+        self.pages.with_transaction(|transaction| {
+            let updated = self.pages.update_properties_tx(transaction, record, title, properties.clone())?;
+            write_record_values_tx(transaction, &updated, &properties)?;
+            Ok(updated)
+        })
     }
 
     pub fn query(&self, database_id: &str, query: DatabaseQuery) -> Result<Vec<Page>, AppError> {
@@ -145,6 +202,7 @@ impl DatabaseRepository {
         database_id: &str,
         query: DatabaseQuery,
     ) -> Result<DatabaseDefinition, AppError> {
+        let _guard = self.lock_vault()?;
         let mut definition = self.get(database_id)?;
         self.validate_query(&definition, &query)?;
         let view = definition
@@ -155,7 +213,7 @@ impl DatabaseRepository {
         view.filters = query.filters;
         view.sorts = query.sorts;
         definition.updated_at = timestamp();
-        self.write_definition(&definition)?;
+        self.write_definition_unlocked(&definition)?;
         Ok(definition)
     }
 
@@ -188,14 +246,11 @@ impl DatabaseRepository {
         query: DatabaseQuery,
     ) -> Result<Vec<Page>, AppError> {
         let mut records: Vec<_> = self
-            .pages
-            .list(false)?
+            .record_ids(database_id)?
             .into_iter()
-            .filter_map(|summary| self.pages.get(&summary.id, false).ok())
-            .filter(|page| {
-                page.kind == PageKind::DatabaseRecord
-                    && page.database_id.as_deref() == Some(database_id)
-            })
+            .map(|record_id| self.load_record(&record_id))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .filter(|page| {
                 query
                     .filters
@@ -290,20 +345,191 @@ impl DatabaseRepository {
         Ok(())
     }
 
-    fn definition_path(&self, id: &str) -> PathBuf {
-        self.definitions_dir.join(format!("{}.json", id))
-    }
-
-    fn write_definition(&self, definition: &DatabaseDefinition) -> Result<(), AppError> {
-        let path = self.definition_path(&definition.id);
-        let temporary = path.with_extension("json.tmp");
-        let json = serde_json::to_vec_pretty(definition)
+    fn write_definition_unlocked(&self, definition: &DatabaseDefinition) -> Result<(), AppError> {
+        let mut connection = self.open_connection()?;
+        let transaction = connection
+            .transaction()
             .map_err(|error| AppError::new("database_write_failed", error.to_string()))?;
-        fs::write(&temporary, json)
+        let title = self
+            .pages
+            .get(&definition.page_id, true)
+            .map(|page| page.title)
+            .unwrap_or_default();
+        let config_json = serde_json::to_string(definition)
             .map_err(|error| AppError::new("database_write_failed", error.to_string()))?;
-        fs::rename(temporary, path)
+        transaction.execute(
+            "INSERT INTO databases(id,page_id,title,config_json) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(id) DO UPDATE SET page_id=excluded.page_id,title=excluded.title,config_json=excluded.config_json",
+            params![definition.id, definition.page_id, title, config_json],
+        ).map_err(|error| AppError::new("database_write_failed", error.to_string()))?;
+        for (position, field) in definition.fields.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO database_fields(id,database_id,name,field_type,position,config_json) VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(id) DO UPDATE SET database_id=excluded.database_id,name=excluded.name,field_type=excluded.field_type,position=excluded.position,config_json=excluded.config_json",
+                params![field.id,definition.id,field.name,serde_json::to_string(&field.field_type).unwrap(),position as i64,serde_json::to_string(&field.options).unwrap()],
+            ).map_err(|error| AppError::new("database_write_failed", error.to_string()))?;
+        }
+        let retained = definition
+            .fields
+            .iter()
+            .map(|field| field.id.as_str())
+            .collect::<Vec<_>>();
+        let mut existing = transaction
+            .prepare("SELECT id FROM database_fields WHERE database_id=?1")
+            .map_err(database_write_error)?;
+        let stale = existing
+            .query_map([&definition.id], |row| row.get::<_, String>(0))
+            .map_err(database_write_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_write_error)?;
+        drop(existing);
+        for field_id in stale
+            .into_iter()
+            .filter(|field_id| !retained.contains(&field_id.as_str()))
+        {
+            transaction
+                .execute("DELETE FROM database_fields WHERE id=?1", [field_id])
+                .map_err(database_write_error)?;
+        }
+        transaction
+            .commit()
             .map_err(|error| AppError::new("database_write_failed", error.to_string()))
     }
+
+    fn open_connection(&self) -> Result<Connection, AppError> {
+        let connection = Connection::open(self.pages.database_path())
+            .map_err(|error| AppError::new("database_open_failed", error.to_string()))?;
+        connection
+            .execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")
+            .map_err(|error| AppError::new("database_open_failed", error.to_string()))?;
+        Ok(connection)
+    }
+
+    fn read_definition_sqlite(&self, id: &str) -> Result<Option<DatabaseDefinition>, AppError> {
+        let connection = self.open_connection()?;
+        let config: Option<String> = connection
+            .query_row(
+                "SELECT config_json FROM databases WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        let Some(config) = config else {
+            return Ok(None);
+        };
+        let mut definition: DatabaseDefinition = serde_json::from_str(&config)
+            .map_err(|error| AppError::new("database_invalid_definition", error.to_string()))?;
+        let mut statement = connection.prepare(
+            "SELECT id,name,field_type,config_json FROM database_fields WHERE database_id=?1 ORDER BY position",
+        ).map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        let rows = statement
+            .query_map([id], |row| {
+                let field_type: String = row.get(2)?;
+                let options: String = row.get(3)?;
+                Ok(DatabaseField {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    field_type: serde_json::from_str(&field_type)
+                        .unwrap_or(DatabaseFieldType::Text),
+                    options: serde_json::from_str(&options).unwrap_or_default(),
+                })
+            })
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        definition.fields = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        Ok(Some(definition))
+    }
+
+    fn write_record_values(
+        &self,
+        page: &Page,
+        properties: &BTreeMap<String, Value>,
+    ) -> Result<(), AppError> {
+        let database_id = page
+            .database_id
+            .as_deref()
+            .ok_or_else(|| AppError::new("database_record_not_found", "记录缺少数据库标识"))?;
+        let mut connection = self.open_connection()?;
+        let transaction = connection.transaction().map_err(database_write_error)?;
+        transaction.execute(
+            "INSERT INTO database_rows(id,database_id,page_id,position) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(id) DO UPDATE SET database_id=excluded.database_id,page_id=excluded.page_id,position=excluded.position",
+            params![page.id,database_id,page.id,page.sort_order],
+        ).map_err(database_write_error)?;
+        transaction
+            .execute("DELETE FROM property_values WHERE row_id=?1", [&page.id])
+            .map_err(database_write_error)?;
+        for (field_id, value) in properties {
+            transaction
+                .execute(
+                    "INSERT INTO property_values(row_id,field_id,value_json) VALUES(?1,?2,?3)",
+                    params![page.id, field_id, serde_json::to_string(value).unwrap()],
+                )
+                .map_err(database_write_error)?;
+        }
+        transaction.commit().map_err(database_write_error)
+    }
+
+    fn record_ids(&self, database_id: &str) -> Result<Vec<String>, AppError> {
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare("SELECT page_id FROM database_rows WHERE database_id=?1 ORDER BY position,id")
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        let rows = statement
+            .query_map([database_id], |row| row.get(0))
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))
+    }
+
+    fn load_record(&self, record_id: &str) -> Result<Page, AppError> {
+        let mut page = self.pages.get(record_id, false)?;
+        let connection = self.open_connection()?;
+        let mut statement = connection
+            .prepare("SELECT field_id,value_json FROM property_values WHERE row_id=?1")
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        let rows = statement
+            .query_map([record_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| AppError::new("database_read_failed", error.to_string()))?;
+        page.properties = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_read_error)?
+            .into_iter()
+            .map(|(id, json)| {
+                serde_json::from_str(&json)
+                    .map(|value| (id, value))
+                    .map_err(|error| AppError::new("database_invalid_record", error.to_string()))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Ok(page)
+    }
+
+    fn lock_vault(&self) -> Result<std::sync::MutexGuard<'_, ()>, AppError> {
+        self.vault_lock
+            .lock()
+            .map_err(|_| AppError::new("vault_write_lock_failed", "笔记库写入锁已损坏"))
+    }
+}
+
+fn write_definition_tx(transaction: &rusqlite::Transaction<'_>, definition: &DatabaseDefinition, title: &str) -> Result<(), AppError> {
+    let config_json = serde_json::to_string(definition).map_err(|error| AppError::new("database_write_failed", error.to_string()))?;
+    transaction.execute("INSERT INTO databases(id,page_id,title,config_json) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET page_id=excluded.page_id,title=excluded.title,config_json=excluded.config_json", params![definition.id,definition.page_id,title,config_json]).map_err(database_write_error)?;
+    for (position,field) in definition.fields.iter().enumerate() {
+        transaction.execute("INSERT INTO database_fields(id,database_id,name,field_type,position,config_json) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET database_id=excluded.database_id,name=excluded.name,field_type=excluded.field_type,position=excluded.position,config_json=excluded.config_json", params![field.id,definition.id,field.name,serde_json::to_string(&field.field_type).unwrap(),position as i64,serde_json::to_string(&field.options).unwrap()]).map_err(database_write_error)?;
+    }
+    Ok(())
+}
+
+fn write_record_values_tx(transaction: &rusqlite::Transaction<'_>, page: &Page, properties: &BTreeMap<String,Value>) -> Result<(), AppError> {
+    let database_id = page.database_id.as_deref().ok_or_else(|| AppError::new("database_record_not_found", "记录缺少数据库标识"))?;
+    transaction.execute("INSERT INTO database_rows(id,database_id,page_id,position) VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET database_id=excluded.database_id,page_id=excluded.page_id,position=excluded.position", params![page.id,database_id,page.id,page.sort_order]).map_err(database_write_error)?;
+    transaction.execute("DELETE FROM property_values WHERE row_id=?1", [&page.id]).map_err(database_write_error)?;
+    for (field_id,value) in properties { transaction.execute("INSERT INTO property_values(row_id,field_id,value_json) VALUES(?1,?2,?3)", params![page.id,field_id,serde_json::to_string(value).unwrap()]).map_err(database_write_error)?; }
+    Ok(())
 }
 
 fn normalize_options(options: Vec<String>) -> Vec<String> {
@@ -315,6 +541,14 @@ fn normalize_options(options: Vec<String>) -> Vec<String> {
         }
     }
     normalized
+}
+
+fn database_write_error(error: rusqlite::Error) -> AppError {
+    AppError::new("database_write_failed", error.to_string())
+}
+
+fn database_read_error(error: rusqlite::Error) -> AppError {
+    AppError::new("database_read_failed", error.to_string())
 }
 
 fn matches_filter(value: Option<&Value>, filter: &super::model::DatabaseFilter) -> bool {
@@ -394,15 +628,86 @@ mod tests {
     }
 
     #[test]
+    fn database_creation_holds_the_vault_lock_for_page_and_definition() {
+        let (repo, root) = temporary_repository();
+        let worker_repo = repo.clone();
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_repo.create_database_with_hook("任务".into(), None, |_| {
+                entered_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+            })
+        });
+
+        entered_receiver.recv().unwrap();
+        assert!(repo.vault_lock.try_lock().is_err());
+        release_sender.send(()).unwrap();
+        let (page, definition) = worker.join().unwrap().unwrap();
+
+        assert_eq!(page.id, definition.id);
+        assert!(repo.get(&definition.id).is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_json_collision_does_not_affect_sqlite_definition_write() {
+        let (repo, root) = temporary_repository();
+
+        let result = repo.create_database_with_hook("任务".into(), None, |page| {
+            fs::create_dir_all(
+                root.join(".noteapp")
+                    .join("databases")
+                    .join(format!("{}.json", page.id)),
+            )
+            .unwrap();
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(repo.pages.list(false).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_sqlite_definition_does_not_fall_back_to_legacy_json() {
+        let root = std::env::temp_dir().join(format!(
+            "qingyu-no-json-fallback-test-{}",
+            Uuid::new_v4()
+        ));
+        let pages = crate::pages::repository::PageRepository::open(root.clone()).unwrap();
+        let database_page = pages
+            .create_typed(
+                "旧数据库".into(),
+                None,
+                String::new(),
+                PageKind::Database,
+                None,
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let definitions = root.join(".noteapp").join("databases");
+        fs::create_dir_all(&definitions).unwrap();
+        fs::write(
+            definitions.join(format!("{}.json", database_page.id)),
+            format!(
+                r#"{{"id":"{0}","pageId":"{0}","fields":[],"views":[],"createdAt":"1","updatedAt":"1"}}"#,
+                database_page.id
+            ),
+        )
+        .unwrap();
+
+        let repository = DatabaseRepository::from_pages(pages).unwrap();
+        let error = repository.get(&database_page.id).unwrap_err();
+
+        assert_eq!(error.code, "database_not_found");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn database_definition_is_persisted_and_records_are_pages() {
         let (repo, root) = temporary_repository();
         let (database_page, mut definition) = repo.create_database("任务".into(), None).unwrap();
         assert_eq!(database_page.kind, PageKind::Database);
-        assert!(root
-            .join(".noteapp/databases")
-            .join(format!("{}.json", definition.id))
-            .exists());
-
         let status = repo
             .add_field(
                 &definition.id,
@@ -422,6 +727,28 @@ mod tests {
         assert_eq!(record.kind, PageKind::DatabaseRecord);
         assert_eq!(record.database_id.as_deref(), Some(definition.id.as_str()));
         assert_eq!(record.parent_id, Some(database_page.id));
+
+        let legacy_json = root
+            .join(".noteapp")
+            .join("databases")
+            .join(format!("{}.json", definition.id));
+        let _ = fs::remove_file(legacy_json);
+        assert_eq!(repo.get(&definition.id).unwrap().fields.len(), 1);
+        let connection = rusqlite::Connection::open(repo.pages.database_path()).unwrap();
+        let counts = [
+            "databases",
+            "database_fields",
+            "database_rows",
+            "property_values",
+        ]
+        .map(|table| {
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        });
+        assert_eq!(counts, [1, 1, 1, 1]);
         let _ = fs::remove_dir_all(root);
     }
 

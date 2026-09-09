@@ -14,7 +14,7 @@ class ImageWidget extends WidgetType {
     const container = document.createElement("span");
     container.className = "qy-image-widget";
     container.textContent = "图片加载中";
-    void readPageAsset(this.path).then(({ mime, bytes }) => {
+    void Promise.resolve().then(() => readPageAsset(this.path)).then(({ mime, bytes }) => {
       if (this.disposed) return;
       this.objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: mime }));
       const image = document.createElement("img");
@@ -33,9 +33,28 @@ class ImageWidget extends WidgetType {
   }
 }
 
+class DividerWidget extends WidgetType {
+  toDOM() { const element = document.createElement("hr"); element.className = "qy-divider-widget"; return element; }
+}
+
 function createDecorations(view: EditorView) {
   const ranges: ReturnType<Decoration["range"]>[] = [];
   const cursor = view.state.selection.main.head;
+  const markdown = view.state.doc.toString();
+  const imagePattern = /!\[([^\]]*)\]\((\/.noteapp\/assets\/[^)\s]+)\)/g;
+  for (const match of markdown.matchAll(imagePattern)) {
+    if (match.index == null) continue;
+    ranges.push(Decoration.replace({ widget: new ImageWidget(match[2], match[1] || "图片") }).range(match.index, match.index + match[0].length));
+  }
+  for (let number = 1; number <= view.state.doc.lines; number += 1) {
+    const line = view.state.doc.line(number);
+    if (/^\s*---\s*$/.test(line.text) && !(cursor >= line.from && cursor <= line.to)) {
+      ranges.push(Decoration.replace({ widget: new DividerWidget() }).range(line.from, line.to));
+    }
+    if (/^\s*<\/?aside[^>]*>\s*$/i.test(line.text)) {
+      ranges.push(Decoration.line({ class: "qy-aside-line" }).range(line.from));
+    }
+  }
   syntaxTree(view.state).iterate({
     enter: (node) => {
       const name = node.name;
@@ -55,11 +74,12 @@ function createDecorations(view: EditorView) {
         ranges.push(Decoration.mark({ class: "qy-inline-code" }).range(node.from, node.to));
       } else if (name === "FencedCode") {
         ranges.push(Decoration.mark({ class: "qy-code-block" }).range(node.from, node.to));
-      } else if (name === "Image" && !active) {
-        const source = view.state.doc.sliceString(node.from, node.to);
-        const match = /^!\[([^\]]*)\]\((\/\.noteapp\/assets\/[^)]+)\)$/.exec(source);
-        if (match) ranges.push(Decoration.replace({ widget: new ImageWidget(match[2], match[1] || "图片") }).range(node.from, node.to));
-      } else if ((name === "HeaderMark" || name === "EmphasisMark" || name === "QuoteMark" || name === "ListMark") && !active) {
+        if (/^```mermaid\b/i.test(view.state.doc.sliceString(node.from, node.to))) {
+          ranges.push(Decoration.mark({ class: "qy-mermaid-widget" }).range(node.from, node.to));
+        }
+      } else if (name === "HeaderMark") {
+        ranges.push(Decoration.replace({}).range(node.from, node.to));
+      } else if ((name === "EmphasisMark" || name === "QuoteMark" || name === "ListMark") && !active) {
         const parent = node.node.parent;
         const parentActive = parent ? cursor >= parent.from && cursor <= parent.to : false;
         if (!parentActive) ranges.push(Decoration.replace({}).range(node.from, node.to));

@@ -31,6 +31,13 @@ pub async fn backup_list(pages: State<'_, PageState>) -> Result<Vec<BackupManife
 }
 
 #[tauri::command]
+pub fn backup_location() -> Result<String, AppError> {
+    crate::portable::PortablePaths::current()
+        .map(|paths| paths.backups_root.to_string_lossy().to_string())
+        .map_err(|error| AppError::new("backup_init_failed", error.to_string()))
+}
+
+#[tauri::command]
 pub async fn backup_restore(
     app: AppHandle,
     pages: State<'_, PageState>,
@@ -85,9 +92,8 @@ fn default_export_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Documents")
+    crate::portable::PortablePaths::current()
+        .map(|paths| paths.exports_root)
+        .unwrap_or_else(|_| PathBuf::from("data").join("exports"))
         .join(format!("轻羽备份-{timestamp}.zip"))
 }

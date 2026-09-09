@@ -67,3 +67,35 @@ pub struct SearchResult {
     pub page: PageSummary,
     pub snippet: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockNode {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub block_type: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub attrs: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub children: Vec<BlockNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PageDocument {
+    pub page_id: String,
+    pub title: String,
+    pub blocks: Vec<BlockNode>,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PageOpenBundle {
+    pub page: Page,
+    pub document: PageDocument,
+    pub links: Vec<PageLink>,
+    pub backlinks: Vec<PageLink>,
+}

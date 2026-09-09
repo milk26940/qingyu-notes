@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectConversationHistory, useAgentStore } from "./agentStore";
 
 const api = vi.hoisted(() => ({
@@ -19,6 +19,10 @@ vi.mock("../lib/tauri/conversations", () => ({
 }));
 
 describe("useAgentStore", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   beforeEach(() => {
     useAgentStore.setState({
       conversations: [], activeId: null, records: [], streamingText: "", plan: null,
@@ -31,6 +35,8 @@ describe("useAgentStore", () => {
     api.subscribeConversationEvents.mockResolvedValue(() => undefined);
     api.subscribeApprovals.mockResolvedValue(() => undefined);
     api.subscribePersistenceErrors.mockResolvedValue(() => undefined);
+    api.interruptConversation.mockResolvedValue(undefined);
+    api.resolveApproval.mockResolvedValue(undefined);
   });
 
   it("projects streaming, plan, diff, tool progress and completion", async () => {
@@ -59,6 +65,41 @@ describe("useAgentStore", () => {
     expect(state.sending).toBe(false);
   });
 
+  it("区分上游失败和主动中止", async () => {
+    let eventHandler: (event: any) => void = () => undefined;
+    api.subscribeConversationEvents.mockImplementation(async (handler) => { eventHandler = handler; return () => undefined; });
+    const conversation = { id: "conversation-1", threadId: "thread-1", title: "测试", scope: { kind: "vault" as const }, createdAt: "0", updatedAt: "0", activeTurnId: "turn-1" };
+    api.listConversations.mockResolvedValue([conversation]);
+    useAgentStore.setState({ conversations: [conversation], activeId: "conversation-1", sending: true, error: null });
+    await useAgentStore.getState().initialize();
+
+    eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-1", status: "failed", error: { message: "上游连接中断" } } });
+    expect(useAgentStore.getState().error).toBe("上游连接中断");
+
+    useAgentStore.setState({ sending: true, error: null });
+    eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-1", status: "interrupted", error: null } });
+    expect(useAgentStore.getState().error).toBeNull();
+  });
+
+  it("等待审批时暂停无响应计时器", async () => {
+    vi.useFakeTimers();
+    let eventHandler: (event: any) => void = () => undefined;
+    let approvalHandler: (approval: any) => void = () => undefined;
+    api.subscribeConversationEvents.mockImplementation(async (handler) => { eventHandler = handler; return () => undefined; });
+    api.subscribeApprovals.mockImplementation(async (handler) => { approvalHandler = handler; return () => undefined; });
+    const conversation = { id: "conversation-1", threadId: "thread-1", title: "测试", scope: { kind: "vault" as const }, createdAt: "0", updatedAt: "0", activeTurnId: "turn-1" };
+    api.listConversations.mockResolvedValue([conversation]);
+    useAgentStore.setState({ conversations: [conversation], activeId: "conversation-1", sending: true, error: null });
+    await useAgentStore.getState().initialize();
+
+    eventHandler({ kind: "itemStarted", threadId: "thread-1", turnId: "turn-1", item: { id: "tool-1", tool: "update", namespace: "page" } });
+    approvalHandler({ id: "approval-1", requestId: 1, threadId: "thread-1", turnId: "turn-1", namespace: "page", tool: "update", arguments: {}, diff: "+ 内容" });
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(api.interruptConversation).not.toHaveBeenCalled();
+    expect(useAgentStore.getState().sending).toBe(true);
+  });
+
   it("restores the latest visible state from JSONL records", () => {
     expect(projectConversationHistory([
       { kind: "planUpdated", timestamp: "1", data: { plan: ["步骤"] } },
@@ -76,11 +117,98 @@ describe("useAgentStore", () => {
     });
 
     const pending = useAgentStore.getState().requestInline("page-1", "规划", "只返回候选正文");
-    await vi.waitFor(() => expect(api.sendConversationMessage).toHaveBeenCalledWith("conversation-1", "只返回候选正文"));
+    await vi.waitFor(() =>
+      expect(api.sendConversationMessage).toHaveBeenCalledWith(
+        "conversation-1",
+        "只返回候选正文",
+        [],
+        undefined,
+        undefined,
+        null,
+      ),
+    );
     eventHandler({ kind: "agentMessageDelta", threadId: "thread-1", turnId: "turn-2", itemId: "item-1", delta: "候选" });
     eventHandler({ kind: "agentMessageDelta", threadId: "thread-1", turnId: "turn-2", itemId: "item-1", delta: "正文" });
     eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-2", status: "completed" } });
 
     await expect(pending).resolves.toBe("候选正文");
+  });
+
+  it("send 优先使用用户输入文字作为标题，没有文字时使用附件名，并保存 displayText 与 requestText", async () => {
+    api.createConversation.mockResolvedValue({
+      id: "conv-created",
+      threadId: null,
+      title: "附件.pdf",
+      scope: { kind: "vault" },
+      createdAt: "1",
+      updatedAt: "1",
+      activeTurnId: null,
+    });
+    api.sendConversationMessage.mockResolvedValue({ threadId: "th-1", turnId: "turn-1" });
+
+    await useAgentStore.getState().send({
+      requestText: "上下文内容",
+      displayText: "",
+      attachments: [{ id: "att-1", name: "附件.pdf", mime: "application/pdf", size: 100, relativePath: "attachments/1/att-1.pdf" }],
+      scope: { kind: "vault" },
+    });
+
+    expect(api.createConversation).toHaveBeenCalledWith("附件.pdf", { kind: "vault" }, null);
+    expect(api.sendConversationMessage).toHaveBeenCalledWith(
+      "conv-created",
+      "上下文内容",
+      expect.any(Array),
+      "",
+      undefined,
+      null,
+    );
+    const record = useAgentStore.getState().records[0];
+    expect(record.data.displayText).toBe("");
+    expect(record.data.text).toBe("上下文内容");
+  });
+
+  it("支持为草稿和独立对话保存模型选择并在发送与新建时传递", async () => {
+    // 尚未创建对话时设置模型
+    useAgentStore.getState().setSelectedModel("gpt-4o");
+    expect(useAgentStore.getState().selectedModel).toBe("gpt-4o");
+
+    api.createConversation.mockResolvedValue({
+      id: "conv-with-model",
+      threadId: null,
+      title: "新模型对话",
+      scope: { kind: "vault" },
+      createdAt: "1",
+      updatedAt: "1",
+      activeTurnId: null,
+    });
+    api.sendConversationMessage.mockResolvedValue({ threadId: "th-2", turnId: "turn-2" });
+
+    // 新建对话关联该模型
+    await useAgentStore.getState().create({ kind: "vault" }, "新模型对话");
+    expect(api.createConversation).toHaveBeenCalledWith("新模型对话", { kind: "vault" }, "gpt-4o");
+    expect(useAgentStore.getState().conversationModels["conv-with-model"]).toBe("gpt-4o");
+
+    // 发送消息时传递该模型
+    await useAgentStore.getState().send("你好");
+    expect(api.sendConversationMessage).toHaveBeenCalledWith(
+      "conv-with-model",
+      "你好",
+      [],
+      "你好",
+      undefined,
+      "gpt-4o",
+    );
+
+    // 切换到另一个已有对话，模型选择同步切换
+    api.getConversationHistory.mockResolvedValue([]);
+    useAgentStore.setState({
+      conversationModels: { "conv-with-model": "gpt-4o", "conv-other": "claude-3-5-sonnet" },
+    });
+    await useAgentStore.getState().open("conv-other");
+    expect(useAgentStore.getState().selectedModel).toBe("claude-3-5-sonnet");
+
+    // 切换对话后随时修改模型，下一轮生效
+    useAgentStore.getState().setSelectedModel("o3-mini");
+    expect(useAgentStore.getState().conversationModels["conv-other"]).toBe("o3-mini");
   });
 });

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 #[cfg(windows)]
 use super::command::codex_creation_flags;
 use super::command::resolve_codex_launch;
-use super::conversation::ConversationStore;
+use super::conversation::{ConversationAttachment, ConversationStore};
 use super::protocol::{
     initialize_request, parse_initialize_response, parse_rpc_message, qingyu_dynamic_tools,
     rpc_notification, rpc_request, rpc_response, CodexEvent, CodexInitializeResult,
@@ -24,13 +24,131 @@ use super::protocol::{
 };
 use crate::backup::model::BackupScope;
 use crate::backup::repository::BackupRepository;
-use crate::database::model::DatabaseFieldType;
+use crate::database::model::{DatabaseDefinition, DatabaseFieldType};
 use crate::database::repository::DatabaseRepository;
 use crate::error::AppError;
-use crate::pages::model::PageLink;
+use crate::pages::model::{BlockNode, Page, PageLink};
 use crate::pages::repository::PageRepository;
 
 type PendingResponse = oneshot::Sender<Result<Value, AppError>>;
+
+fn find_block<'a>(blocks: &'a [BlockNode], id: &str) -> Option<&'a BlockNode> {
+    blocks.iter().find_map(|block| {
+        if block.id == id {
+            Some(block)
+        } else {
+            find_block(&block.children, id)
+        }
+    })
+}
+
+fn find_block_mut<'a>(blocks: &'a mut [BlockNode], id: &str) -> Option<&'a mut BlockNode> {
+    blocks.iter_mut().find_map(|block| {
+        if block.id == id {
+            Some(block)
+        } else {
+            find_block_mut(&mut block.children, id)
+        }
+    })
+}
+
+fn validate_block_ids(blocks: &[BlockNode]) -> Result<(), AppError> {
+    fn collect(blocks: &[BlockNode], ids: &mut HashSet<String>) -> Result<(), AppError> {
+        for block in blocks {
+            if block.id.trim().is_empty() {
+                return Err(AppError::new("block_invalid_id", "区块 ID 不能为空"));
+            }
+            if !ids.insert(block.id.clone()) {
+                return Err(AppError::new("block_duplicate_id", "区块 ID 已存在"));
+            }
+            collect(&block.children, ids)?;
+        }
+        Ok(())
+    }
+
+    collect(blocks, &mut HashSet::new())
+}
+
+fn insert_block(
+    blocks: &mut Vec<BlockNode>,
+    parent_id: Option<&str>,
+    position: usize,
+    block: BlockNode,
+) -> Result<(), AppError> {
+    let mut candidate = blocks.clone();
+    let siblings = match parent_id {
+        Some(parent_id) => &mut find_block_mut(&mut candidate, parent_id)
+            .ok_or_else(|| AppError::new("block_parent_not_found", "父区块不存在"))?
+            .children,
+        None => &mut candidate,
+    };
+    siblings.insert(position.min(siblings.len()), block);
+    validate_block_ids(&candidate)?;
+    *blocks = candidate;
+    Ok(())
+}
+
+fn replace_block(blocks: &mut Vec<BlockNode>, replacement: BlockNode) -> Result<(), AppError> {
+    let mut candidate = blocks.clone();
+    let target = find_block_mut(&mut candidate, &replacement.id)
+        .ok_or_else(|| AppError::new("block_not_found", "区块不存在"))?;
+    *target = replacement;
+    validate_block_ids(&candidate)?;
+    *blocks = candidate;
+    Ok(())
+}
+
+fn remove_block(blocks: &mut Vec<BlockNode>, id: &str) -> Option<BlockNode> {
+    if let Some(index) = blocks.iter().position(|block| block.id == id) {
+        return Some(blocks.remove(index));
+    }
+    blocks
+        .iter_mut()
+        .find_map(|block| remove_block(&mut block.children, id))
+}
+
+fn move_block(
+    blocks: &mut Vec<BlockNode>,
+    block_id: &str,
+    parent_id: Option<&str>,
+    position: usize,
+) -> Result<(), AppError> {
+    let source = find_block(blocks, block_id)
+        .ok_or_else(|| AppError::new("block_not_found", "区块不存在"))?;
+    if parent_id == Some(block_id)
+        || parent_id.is_some_and(|parent_id| find_block(&source.children, parent_id).is_some())
+    {
+        return Err(AppError::new(
+            "block_invalid_parent",
+            "不能把区块移动到自身或其后代中",
+        ));
+    }
+    if parent_id.is_some_and(|parent_id| find_block(blocks, parent_id).is_none()) {
+        return Err(AppError::new("block_parent_not_found", "父区块不存在"));
+    }
+
+    let mut candidate = blocks.clone();
+    let block = remove_block(&mut candidate, block_id)
+        .ok_or_else(|| AppError::new("block_not_found", "区块不存在"))?;
+    let siblings = match parent_id {
+        Some(parent_id) => &mut find_block_mut(&mut candidate, parent_id)
+            .ok_or_else(|| AppError::new("block_parent_not_found", "父区块不存在"))?
+            .children,
+        None => &mut candidate,
+    };
+    siblings.insert(position.min(siblings.len()), block);
+    validate_block_ids(&candidate)?;
+    *blocks = candidate;
+    Ok(())
+}
+
+fn delete_block(blocks: &mut Vec<BlockNode>, block_id: &str) -> Result<(), AppError> {
+    let mut candidate = blocks.clone();
+    remove_block(&mut candidate, block_id)
+        .ok_or_else(|| AppError::new("block_not_found", "区块不存在"))?;
+    *blocks = candidate;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "state")]
@@ -64,6 +182,17 @@ pub struct PendingApproval {
     pub vault_root: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexModelOption {
+    pub id: String,
+    pub model: String,
+    pub display_name: String,
+    pub description: String,
+    pub is_default: bool,
+    pub input_modalities: Vec<String>,
+}
+
 struct CodexProcess {
     child: Child,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -89,6 +218,7 @@ pub struct CodexRuntime {
     lifecycle: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
     vault_root: Arc<RwLock<Option<String>>>,
+    knowledge_queries: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for CodexRuntime {
@@ -104,6 +234,7 @@ impl Default for CodexRuntime {
             lifecycle: Arc::new(Mutex::new(())),
             generation: Arc::new(AtomicU64::new(0)),
             vault_root: Arc::new(RwLock::new(None)),
+            knowledge_queries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -270,15 +401,45 @@ impl CodexRuntime {
         }
     }
 
+    pub async fn list_models(&self) -> Result<Vec<CodexModelOption>, AppError> {
+        let mut models = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let result = self
+                .request(
+                    "model/list",
+                    json!({ "cursor": cursor, "limit": 100, "includeHidden": false }),
+                )
+                .await?;
+            let page = result
+                .get("data")
+                .cloned()
+                .ok_or_else(|| AppError::new("codex_invalid_models", "Codex 未返回模型列表"))?;
+            models.extend(
+                serde_json::from_value::<Vec<CodexModelOption>>(page)
+                    .map_err(|error| AppError::new("codex_invalid_models", error.to_string()))?,
+            );
+            cursor = result
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(models)
+    }
+
     pub async fn start_thread(
         &self,
         cwd: &Path,
         scope_instruction: &str,
+        model: Option<&str>,
     ) -> Result<String, AppError> {
         let result = match self
             .request(
                 "thread/start",
-                thread_start_params(cwd, scope_instruction, true),
+                thread_start_params(cwd, scope_instruction, model, true),
             )
             .await
         {
@@ -286,7 +447,7 @@ impl CodexRuntime {
             Err(error) if dynamic_tools_unavailable(&error) => {
                 self.request(
                     "thread/start",
-                    thread_start_params(cwd, scope_instruction, false),
+                    thread_start_params(cwd, scope_instruction, model, false),
                 )
                 .await?
             }
@@ -309,18 +470,40 @@ impl CodexRuntime {
         &self,
         thread_id: &str,
         text: &str,
+        original_user_query: &str,
         cwd: &Path,
+        attachments: &[ConversationAttachment],
+        model: Option<&str>,
     ) -> Result<String, AppError> {
+        let mut input = vec![json!({ "type": "text", "text": text })];
+        if let Some(store) = self.conversations.read().await.clone() {
+            for attachment in attachments.iter().filter(|attachment| attachment.mime.starts_with("image/")) {
+                let path = store.attachment_path(&attachment.relative_path)?;
+                input.push(json!({ "type": "localImage", "path": path.to_string_lossy() }));
+            }
+        }
+        let mut params = json!({
+            "threadId": thread_id, "input": input,
+            "cwd": cwd.to_string_lossy(), "approvalPolicy": "never",
+            "sandboxPolicy": { "type": "readOnly", "networkAccess": false }
+        });
+        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+            params["model"] = json!(model);
+        }
+        self.knowledge_queries
+            .lock()
+            .await
+            .insert(thread_id.to_owned(), original_user_query.to_owned());
         let result = self
             .request(
                 "turn/start",
-                json!({
-                    "threadId": thread_id, "input": [{ "type": "text", "text": text }],
-                    "cwd": cwd.to_string_lossy(), "approvalPolicy": "never",
-                    "sandboxPolicy": { "type": "readOnly", "networkAccess": false }
-                }),
+                params,
             )
-            .await?;
+            .await;
+        if result.is_err() {
+            self.knowledge_queries.lock().await.remove(thread_id);
+        }
+        let result = result?;
         result
             .pointer("/turn/id")
             .and_then(Value::as_str)
@@ -458,6 +641,7 @@ impl CodexRuntime {
                                 }
                             }
                             CodexEvent::TurnCompleted { .. } => {
+                                self.knowledge_queries.lock().await.remove(thread_id);
                                 if let Err(error) =
                                     store.set_active_turn_for_thread(thread_id, None)
                                 {
@@ -509,11 +693,21 @@ impl CodexRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let arguments = request
+        let mut arguments = request
             .params
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        if is_dangerous(&namespace, &tool) {
+            if let Some(pages) = self.pages.read().await.clone() {
+                if let Err(error) =
+                    attach_approval_baseline(&pages, &namespace, &tool, &mut arguments)
+                {
+                    let _ = write_tool_result(stdin, request.id, Err(error)).await;
+                    return;
+                }
+            }
+        }
         let call_id = request
             .params
             .get("callId")
@@ -532,6 +726,13 @@ impl CodexRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        let original_query = self.knowledge_queries.lock().await.get(&thread_id).cloned();
+        force_knowledge_query(
+            &namespace,
+            &tool,
+            &mut arguments,
+            original_query.as_deref(),
+        );
         if let Some(store) = self.conversations.read().await.clone() {
             if let Err(error) =
                 store.append_server_request(&thread_id, &request.method, &request.params)
@@ -581,7 +782,10 @@ impl CodexRuntime {
                     diff: approval.diff.clone(),
                 },
             );
-            let _ = app.emit("codex://approval", approval);
+            // 自动执行仍经过既有的路径校验、版本检查和变更记录。
+            if let Err(error) = self.resolve_approval(app, &approval.id, true).await {
+                let _ = app.emit("codex://persistence-error", error);
+            }
         } else {
             let diff = if is_write_tool(&namespace, &tool) {
                 self.describe_change(&namespace, &tool, &arguments)
@@ -602,6 +806,20 @@ impl CodexRuntime {
                 let _ = app.emit("codex://event", event);
             }
             let result = self.execute_tool(&namespace, &tool, &arguments).await;
+            if namespace == "knowledge" && tool == "search" {
+                if let Ok(value) = &result {
+                    let event = CodexEvent::KnowledgeSearchResult {
+                        thread_id: thread_id.clone(),
+                        turn_id: turn_id.clone(),
+                        call_id: call_id.clone(),
+                        result: value.clone(),
+                    };
+                    if let Some(store) = self.conversations.read().await.clone() {
+                        let _ = store.append_event(&thread_id, &event);
+                    }
+                    let _ = app.emit("codex://event", event);
+                }
+            }
             if let Some(store) = self.conversations.read().await.clone() {
                 let _ = store.append_tool_outcome(
                     &thread_id,
@@ -643,8 +861,53 @@ impl CodexRuntime {
                 .ok_or_else(|| AppError::new("tool_invalid_arguments", format!("缺少参数 {}", key)))
         };
         let value = match (namespace, tool) {
+            ("knowledge", "search") => {
+                let query=string("query")?;
+                let knowledge=crate::semantic::knowledge::search(&pages,query)?;
+                let effective_query = knowledge["effectiveQuery"].as_str().unwrap_or_default();
+                let semantic_result = if effective_query.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    crate::commands::semantic::search_repository(&pages,effective_query).await
+                };
+                match semantic_result {
+                    Ok(semantic)=>{
+                        let semantic = semantic.into_iter().map(|item| json!({
+                            "pageId":item.page_id,
+                            "blockId":item.block_id,
+                            "pageTitle":item.page_title,
+                            "snippet":item.snippet,
+                            "score":item.score,
+                            "link":format!("qingyu://page/{}#{}", item.page_id, item.block_id)
+                        })).collect::<Vec<_>>();
+                        json!({
+                        "originalQuery":knowledge["originalQuery"],
+                        "effectiveQuery":knowledge["effectiveQuery"],
+                        "queryTerms":knowledge["queryTerms"],
+                        "keyword":knowledge["keyword"],
+                        "semantic":semantic,
+                        "wiki":knowledge["wiki"],
+                        "graph":{"relations":knowledge["relations"],"matchedEntities":knowledge["matchedEntities"]}
+                    })},
+                    Err(error)=>json!({
+                        "originalQuery":knowledge["originalQuery"],
+                        "effectiveQuery":knowledge["effectiveQuery"],
+                        "queryTerms":knowledge["queryTerms"],
+                        "keyword":knowledge["keyword"],
+                        "semantic":[],
+                        "wiki":knowledge["wiki"],
+                        "graph":{"relations":knowledge["relations"],"matchedEntities":knowledge["matchedEntities"]},
+                        "semanticUnavailable":error.message
+                    }),
+                }
+            }
             ("page", "search") => serde_json::to_value(pages.search(string("query")?)?).unwrap(),
             ("page", "read") => serde_json::to_value(pages.get(string("id")?, false)?).unwrap(),
+            ("page", "read_document") => serde_json::to_value(pages.open_bundle(string("id")?)?.document).unwrap(),
+            ("attachment", "read") => {
+                let store = self.conversations.read().await.clone().ok_or_else(|| AppError::new("conversation_not_initialized", "对话存储尚未初始化"))?;
+                json!({ "text": store.read_attachment_text(string("path")?)? })
+            }
             ("page", "create") => serde_json::to_value(
                 pages.create(
                     string("title")?.to_owned(),
@@ -656,12 +919,51 @@ impl CodexRuntime {
                 )?,
             )
             .unwrap(),
-            ("page", "update") => serde_json::to_value(pages.update(
+            ("page", "update") => serde_json::to_value(pages.update_checked(
                 string("id")?,
                 string("title")?.to_owned(),
                 string("content")?.to_owned(),
+                string("expectedTitle")?,
+                string("expectedContent")?,
             )?)
             .unwrap(),
+            ("page", "create_block") | ("page", "update_block") | ("page", "move_block") | ("page", "delete_block") => {
+                let page_id = string("pageId")?;
+                let revision = arguments.get("revision").and_then(Value::as_i64).ok_or_else(|| AppError::new("tool_invalid_arguments", "缺少 revision"))?;
+                let mut document = pages.open_bundle(page_id)?.document;
+                match tool {
+                    "create_block" => {
+                        let block = serde_json::from_value(arguments.get("block").cloned().ok_or_else(|| AppError::new("tool_invalid_arguments", "缺少 block"))?).map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
+                        let position = arguments.get("position").and_then(Value::as_u64).unwrap_or(document.blocks.len() as u64) as usize;
+                        insert_block(
+                            &mut document.blocks,
+                            arguments.get("parentId").and_then(Value::as_str),
+                            position,
+                            block,
+                        )?;
+                    }
+                    "update_block" => {
+                        let block: crate::pages::model::BlockNode = serde_json::from_value(arguments.get("block").cloned().ok_or_else(|| AppError::new("tool_invalid_arguments", "缺少 block"))?).map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
+                        replace_block(&mut document.blocks, block)?;
+                    }
+                    "move_block" => {
+                        let block_id = string("blockId")?;
+                        let position = arguments.get("position").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        move_block(
+                            &mut document.blocks,
+                            block_id,
+                            arguments.get("parentId").and_then(Value::as_str),
+                            position,
+                        )?;
+                    }
+                    "delete_block" => {
+                        let block_id = string("blockId")?;
+                        delete_block(&mut document.blocks, block_id)?;
+                    }
+                    _ => unreachable!(),
+                }
+                serde_json::to_value(pages.save_document(document, revision)?).unwrap()
+            }
             ("page", "move") => serde_json::to_value(
                 pages.move_page(
                     string("id")?,
@@ -676,7 +978,14 @@ impl CodexRuntime {
                 )?,
             )
             .unwrap(),
-            ("page", "archive") => serde_json::to_value(pages.trash(string("id")?)?).unwrap(),
+            ("page", "archive") => {
+                let expected: Page =
+                    serde_json::from_value(arguments.get("expectedPage").cloned().ok_or_else(
+                        || AppError::new("tool_invalid_arguments", "缺少 expectedPage"),
+                    )?)
+                    .map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
+                serde_json::to_value(pages.trash_checked(string("id")?, &expected)?).unwrap()
+            }
             ("relation", "backlinks") => {
                 let target_id = string("id")?;
                 let mut links = pages.backlinks(target_id)?;
@@ -739,13 +1048,30 @@ impl CodexRuntime {
                 let database_id = record.database_id.clone().ok_or_else(|| {
                     AppError::new("database_record_not_found", "源页面不是数据库记录")
                 })?;
-                serde_json::to_value(repo.update_record(
-                    &database_id,
-                    &record.id,
-                    record.title,
-                    properties,
-                )?)
-                .unwrap()
+                let expected: Option<Page> = if tool == "unlink" {
+                    Some(
+                        serde_json::from_value(arguments.get("expectedPage").cloned().ok_or_else(
+                            || AppError::new("tool_invalid_arguments", "缺少 expectedPage"),
+                        )?)
+                        .map_err(|error| {
+                            AppError::new("tool_invalid_arguments", error.to_string())
+                        })?,
+                    )
+                } else {
+                    None
+                };
+                let updated = if let Some(expected) = expected.as_ref() {
+                    repo.update_record_checked(
+                        &database_id,
+                        &record.id,
+                        record.title,
+                        properties,
+                        expected,
+                    )?
+                } else {
+                    repo.update_record(&database_id, &record.id, record.title, properties)?
+                };
+                serde_json::to_value(updated).unwrap()
             }
             ("database", "query") => {
                 let repo = DatabaseRepository::from_pages(pages.clone())?;
@@ -785,8 +1111,13 @@ impl CodexRuntime {
                         .unwrap_or_else(|| json!({})),
                 )
                 .map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
+                let expected: Page =
+                    serde_json::from_value(arguments.get("expectedPage").cloned().ok_or_else(
+                        || AppError::new("tool_invalid_arguments", "缺少 expectedPage"),
+                    )?)
+                    .map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
                 serde_json::to_value(
-                    repo.update_record(
+                    repo.update_record_checked(
                         &database_id,
                         &record.id,
                         arguments
@@ -795,6 +1126,7 @@ impl CodexRuntime {
                             .unwrap_or(&record.title)
                             .to_owned(),
                         properties,
+                        &expected,
                     )?,
                 )
                 .unwrap()
@@ -809,9 +1141,19 @@ impl CodexRuntime {
                         AppError::new("tool_invalid_arguments", "缺少 fieldType")
                     })?)
                     .map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
+                let expected: DatabaseDefinition = serde_json::from_value(
+                    arguments
+                        .get("expectedDefinition")
+                        .cloned()
+                        .ok_or_else(|| {
+                            AppError::new("tool_invalid_arguments", "缺少 expectedDefinition")
+                        })?,
+                )
+                .map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
                 serde_json::to_value(
-                    repo.add_field(
+                    repo.add_field_checked(
                         string("databaseId")?,
+                        &expected,
                         schema
                             .get("name")
                             .and_then(Value::as_str)
@@ -948,16 +1290,65 @@ impl CodexRuntime {
 fn is_dangerous(namespace: &str, tool: &str) -> bool {
     matches!(
         (namespace, tool),
-        ("page", "update" | "archive")
+        ("page", "update" | "archive" | "create_block" | "update_block" | "move_block" | "delete_block")
             | ("database", "update_schema" | "update_record")
             | ("relation", "unlink")
     )
 }
 
+fn attach_approval_baseline(
+    pages: &PageRepository,
+    namespace: &str,
+    tool: &str,
+    arguments: &mut Value,
+) -> Result<(), AppError> {
+    let object = arguments
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("tool_invalid_arguments", "工具参数必须是对象"))?;
+    let id = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| AppError::new("tool_invalid_arguments", format!("缺少参数 {key}")))
+    };
+    match (namespace, tool) {
+        ("page", "update") => {
+            let current = pages.get(&id("id")?, false)?;
+            object.insert("expectedTitle".into(), json!(current.title));
+            object.insert("expectedContent".into(), json!(current.content));
+        }
+        ("page", "archive") | ("database", "update_record") => {
+            let current = pages.get(&id("id")?, false)?;
+            object.insert(
+                "expectedPage".into(),
+                serde_json::to_value(current).unwrap(),
+            );
+        }
+        ("database", "update_schema") => {
+            let database_id = id("databaseId")?;
+            let definition = DatabaseRepository::from_pages(pages.clone())?.get(&database_id)?;
+            object.insert(
+                "expectedDefinition".into(),
+                serde_json::to_value(definition).unwrap(),
+            );
+        }
+        ("relation", "unlink") => {
+            let current = pages.get(&id("sourceId")?, false)?;
+            object.insert(
+                "expectedPage".into(),
+                serde_json::to_value(current).unwrap(),
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn is_write_tool(namespace: &str, tool: &str) -> bool {
     matches!(
         (namespace, tool),
-        ("page", "create" | "update" | "move" | "archive")
+        ("page", "create" | "update" | "move" | "archive" | "create_block" | "update_block" | "move_block" | "delete_block")
             | (
                 "database",
                 "update_schema" | "create_record" | "update_record"
@@ -966,7 +1357,7 @@ fn is_write_tool(namespace: &str, tool: &str) -> bool {
     )
 }
 
-fn thread_start_params(cwd: &Path, scope_instruction: &str, dynamic_tools: bool) -> Value {
+fn thread_start_params(cwd: &Path, scope_instruction: &str, model: Option<&str>, dynamic_tools: bool) -> Value {
     let mut params = json!({
         "cwd": cwd.to_string_lossy(), "approvalPolicy": "never", "sandbox": "read-only",
         "serviceName": "qingyu_notes", "developerInstructions": scope_instruction,
@@ -976,6 +1367,9 @@ fn thread_start_params(cwd: &Path, scope_instruction: &str, dynamic_tools: bool)
             "web_search": "disabled", "agents": { "enabled": false }, "mcp_servers": {}
         }
     });
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        params["model"] = json!(model);
+    }
     if dynamic_tools {
         params["dynamicTools"] = qingyu_dynamic_tools();
     } else {
@@ -993,6 +1387,19 @@ fn dynamic_tools_unavailable(error: &AppError) -> bool {
         || message.contains("experimental")
         || message.contains("unsupported")
         || message.contains("unknown field")
+}
+
+fn force_knowledge_query(
+    namespace: &str,
+    tool: &str,
+    arguments: &mut Value,
+    original_query: Option<&str>,
+) {
+    if namespace == "knowledge" && tool == "search" {
+        if let Some(query) = original_query {
+            arguments["query"] = json!(query);
+        }
+    }
 }
 
 fn approval_matches(approval: &PendingApproval, generation: u64, vault_root: &str) -> bool {
@@ -1034,7 +1441,7 @@ fn line_diff(current: &str, proposed: &str) -> String {
 }
 
 fn emit_vault_change(app: &AppHandle, namespace: &str, tool: &str, arguments: &Value) {
-    let page_ids = ["id", "sourceId", "targetId"]
+    let page_ids = ["id", "pageId", "sourceId", "targetId"]
         .iter()
         .filter_map(|key| arguments.get(key).and_then(Value::as_str))
         .collect::<Vec<_>>();
@@ -1102,6 +1509,57 @@ mod tests {
 
     use super::*;
 
+    fn test_block(id: &str, children: Vec<crate::pages::model::BlockNode>) -> crate::pages::model::BlockNode {
+        crate::pages::model::BlockNode {
+            id: id.into(),
+            block_type: "paragraph".into(),
+            text: id.into(),
+            attrs: BTreeMap::new(),
+            children,
+        }
+    }
+
+    #[test]
+    fn structured_block_operations_recurse_through_nested_children() {
+        let mut blocks = vec![test_block(
+            "parent-a",
+            vec![test_block("nested", Vec::new())],
+        ), test_block("parent-b", Vec::new())];
+
+        insert_block(
+            &mut blocks,
+            Some("parent-a"),
+            1,
+            test_block("created", Vec::new()),
+        )
+        .unwrap();
+        replace_block(
+            &mut blocks,
+            test_block("nested", vec![test_block("nested-child", Vec::new())]),
+        )
+        .unwrap();
+        move_block(&mut blocks, "nested", Some("parent-b"), 0).unwrap();
+        delete_block(&mut blocks, "created").unwrap();
+
+        assert_eq!(blocks[0].children.len(), 0);
+        assert_eq!(blocks[1].children[0].id, "nested");
+        assert_eq!(blocks[1].children[0].children[0].id, "nested-child");
+    }
+
+    #[test]
+    fn moving_a_block_into_its_descendant_is_rejected_without_mutating_document() {
+        let original = vec![test_block(
+            "parent",
+            vec![test_block("child", Vec::new())],
+        )];
+        let mut blocks = original.clone();
+
+        let error = move_block(&mut blocks, "parent", Some("child"), 0).unwrap_err();
+
+        assert_eq!(error.code, "block_invalid_parent");
+        assert_eq!(blocks, original);
+    }
+
     #[test]
     fn app_server_is_started_with_dynamic_tools_only() {
         let args = codex_app_server_args();
@@ -1117,12 +1575,17 @@ mod tests {
     fn dangerous_tools_require_approval() {
         assert!(is_dangerous("page", "update"));
         assert!(is_dangerous("page", "archive"));
+        assert!(is_dangerous("page", "create_block"));
+        assert!(is_dangerous("page", "update_block"));
+        assert!(is_dangerous("page", "move_block"));
+        assert!(is_dangerous("page", "delete_block"));
         assert!(is_dangerous("database", "update_schema"));
         assert!(is_dangerous("database", "update_record"));
         assert!(is_dangerous("relation", "unlink"));
         assert!(!is_dangerous("page", "search"));
         assert!(!is_dangerous("relation", "link"));
         assert!(is_write_tool("page", "create"));
+        assert!(is_write_tool("page", "update_block"));
         assert!(is_write_tool("database", "update_record"));
         assert!(!is_write_tool("page", "read"));
     }
@@ -1131,12 +1594,26 @@ mod tests {
     fn unsupported_dynamic_tools_fall_back_to_read_only_thread() {
         let error = AppError::new("codex_rpc_error", "unsupported dynamicTools capability");
         assert!(dynamic_tools_unavailable(&error));
-        let params = thread_start_params(Path::new(r"C:\notes"), "读取当前页面", false);
+        let params = thread_start_params(Path::new(r"C:\notes"), "读取当前页面", None, false);
         assert!(params.get("dynamicTools").is_none());
         assert!(params["developerInstructions"]
             .as_str()
             .unwrap()
             .contains("只能回答只读问题"));
+    }
+
+    #[test]
+    fn knowledge_search_uses_the_original_user_question() {
+        let mut arguments = json!({ "query": "device tree Platform bus" });
+
+        force_knowledge_query(
+            "knowledge",
+            "search",
+            &mut arguments,
+            Some("设备树和 Platform 总线是什么关系？"),
+        );
+
+        assert_eq!(arguments["query"], "设备树和 Platform 总线是什么关系？");
     }
 
     #[test]
@@ -1225,6 +1702,117 @@ mod tests {
             assert!(preview.contains("+ 新标题"));
             assert!(preview.contains("- 旧正文"));
             assert!(preview.contains("+ 新正文"));
+            let _ = std::fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn database_record_update_rejects_changes_made_after_approval() {
+        tauri::async_runtime::block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("qingyu-agent-record-cas-{}", Uuid::new_v4()));
+            let pages = PageRepository::open(root.clone()).unwrap();
+            let databases = DatabaseRepository::from_pages(pages.clone()).unwrap();
+            let (database, _) = databases.create_database("任务".into(), None).unwrap();
+            let record = databases
+                .create_record(&database.id, "原记录".into(), BTreeMap::new())
+                .unwrap();
+            databases
+                .update_record(&database.id, &record.id, "用户修改".into(), BTreeMap::new())
+                .unwrap();
+            let runtime = CodexRuntime::default();
+            *runtime.pages.write().await = Some(pages.clone());
+
+            let error = runtime
+                .execute_tool(
+                    "database",
+                    "update_record",
+                    &json!({
+                        "id": record.id,
+                        "title": "Agent 修改",
+                        "properties": {},
+                        "expectedPage": record
+                    }),
+                )
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.code, "approval_stale_data");
+            assert_eq!(pages.get(&record.id, false).unwrap().title, "用户修改");
+            let _ = std::fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn page_archive_rejects_changes_made_after_approval() {
+        tauri::async_runtime::block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("qingyu-agent-archive-cas-{}", Uuid::new_v4()));
+            let pages = PageRepository::open(root.clone()).unwrap();
+            let page = pages
+                .create("原页面".into(), None, "原正文".into())
+                .unwrap();
+            pages
+                .update_checked(
+                    &page.id,
+                    "用户修改".into(),
+                    page.content.clone(),
+                    &page.title,
+                    &page.content,
+                )
+                .unwrap();
+            let runtime = CodexRuntime::default();
+            *runtime.pages.write().await = Some(pages.clone());
+
+            let error = runtime
+                .execute_tool(
+                    "page",
+                    "archive",
+                    &json!({ "id": page.id, "expectedPage": page }),
+                )
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.code, "approval_stale_data");
+            assert!(pages.get(&page.id, false).is_ok());
+            let _ = std::fs::remove_dir_all(root);
+        });
+    }
+
+    #[test]
+    fn database_schema_update_rejects_changes_made_after_approval() {
+        tauri::async_runtime::block_on(async {
+            let root =
+                std::env::temp_dir().join(format!("qingyu-agent-schema-cas-{}", Uuid::new_v4()));
+            let pages = PageRepository::open(root.clone()).unwrap();
+            let databases = DatabaseRepository::from_pages(pages.clone()).unwrap();
+            let (database, definition) = databases.create_database("任务".into(), None).unwrap();
+            databases
+                .add_field(
+                    &database.id,
+                    "用户字段".into(),
+                    DatabaseFieldType::Text,
+                    vec![],
+                )
+                .unwrap();
+            let runtime = CodexRuntime::default();
+            *runtime.pages.write().await = Some(pages);
+
+            let error = runtime
+                .execute_tool(
+                    "database",
+                    "update_schema",
+                    &json!({
+                        "databaseId": database.id,
+                        "schema": { "name": "Agent 字段", "fieldType": "text" },
+                        "expectedDefinition": definition
+                    }),
+                )
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.code, "approval_stale_data");
+            assert_eq!(databases.get(&database.id).unwrap().fields.len(), 1);
             let _ = std::fs::remove_dir_all(root);
         });
     }

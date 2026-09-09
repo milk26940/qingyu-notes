@@ -1,17 +1,12 @@
 [package]
-name = "tauri-app"
+name = "qingyu-notes"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "轻羽本地优先笔记与知识库"
+authors = ["QingYu"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tauri_app_lib"
+name = "qingyu_notes_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -20,11 +15,24 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1", features = ["io-util", "process", "sync", "time"] }
 sha2 = "0.10"
+base64 = "0.22"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+notify = "8"
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+pdf-extract = "0.9"
+csv = "1"
+pulldown-cmark = "0.13"
+pulldown-cmark-to-cmark = "21"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography", "Win32_System_Memory"] }

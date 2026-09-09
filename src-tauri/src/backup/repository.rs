@@ -12,36 +12,23 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use super::model::{BackupEntry, BackupManifest, BackupScope};
 use crate::error::AppError;
-use crate::pages::model::PageKind;
+use crate::pages::repository::shared_vault_lock;
 use crate::pages::repository::PageRepository;
+use crate::portable::PortablePaths;
 
 #[derive(Debug, Clone)]
 pub struct BackupRepository {
     vault_root: PathBuf,
     backup_root: PathBuf,
     lock: Arc<Mutex<()>>,
+    vault_lock: Arc<Mutex<()>>,
 }
 
 impl BackupRepository {
     pub fn open(vault_root: &Path) -> Result<Self, AppError> {
-        let local_data = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .ok_or_else(|| AppError::new("backup_init_failed", "无法定位本地应用数据目录"))?;
-        let vault_id = hash_bytes(
-            vault_root
-                .canonicalize()
-                .unwrap_or_else(|_| vault_root.to_path_buf())
-                .to_string_lossy()
-                .to_lowercase()
-                .as_bytes(),
-        );
-        Self::open_at(
-            vault_root,
-            &local_data
-                .join("QingYu")
-                .join("backups")
-                .join(&vault_id[..16]),
-        )
+        let paths = PortablePaths::current()
+            .map_err(|error| AppError::new("backup_init_failed", error.to_string()))?;
+        Self::open_at(vault_root, &paths.backups_root)
     }
 
     fn open_at(vault_root: &Path, backup_root: &Path) -> Result<Self, AppError> {
@@ -53,6 +40,7 @@ impl BackupRepository {
             vault_root: vault_root.to_path_buf(),
             backup_root: backup_root.to_path_buf(),
             lock: Arc::new(Mutex::new(())),
+            vault_lock: shared_vault_lock(vault_root),
         })
     }
 
@@ -62,6 +50,7 @@ impl BackupRepository {
         source: impl Into<String>,
     ) -> Result<BackupManifest, AppError> {
         let _guard = self.lock()?;
+        let _vault_guard = self.lock_vault()?;
         self.checkpoint_unlocked(scope, source.into())
     }
 
@@ -90,6 +79,7 @@ impl BackupRepository {
 
     pub fn restore(&self, snapshot_id: &str) -> Result<BackupManifest, AppError> {
         let _guard = self.lock()?;
+        let _vault_guard = self.lock_vault()?;
         let manifest = self.read_manifest(snapshot_id)?;
         self.checkpoint_unlocked(manifest.scope.clone(), "beforeRestore".into())?;
         let staging = self.rebuild_staging(&manifest)?;
@@ -101,6 +91,7 @@ impl BackupRepository {
 
     pub fn export_zip(&self, destination: &Path) -> Result<PathBuf, AppError> {
         let _guard = self.lock()?;
+        let _vault_guard = self.lock_vault()?;
         if is_within(destination, &self.vault_root) || is_within(destination, &self.backup_root) {
             return Err(AppError::new(
                 "backup_export_unsafe_path",
@@ -118,7 +109,8 @@ impl BackupRepository {
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
             .unix_permissions(0o644);
-        for (relative, path) in self.collect_files(&BackupScope::Vault)? {
+        let (files, temporary_files) = self.collect_files(&BackupScope::Vault)?;
+        for (relative, path) in files {
             archive
                 .start_file(&relative, options)
                 .map_err(|error| AppError::new("backup_export_failed", error.to_string()))?;
@@ -133,6 +125,9 @@ impl BackupRepository {
         archive
             .finish()
             .map_err(|error| AppError::new("backup_export_failed", error.to_string()))?;
+        for path in temporary_files {
+            let _ = fs::remove_file(path);
+        }
         fs::rename(&temporary, destination).map_err(|error| {
             let _ = fs::remove_file(&temporary);
             AppError::new("backup_export_failed", error.to_string())
@@ -142,6 +137,7 @@ impl BackupRepository {
 
     pub fn import_zip(&self, source: &Path) -> Result<BackupManifest, AppError> {
         let _guard = self.lock()?;
+        let _vault_guard = self.lock_vault()?;
         let file = fs::File::open(source)
             .map_err(|error| AppError::new("backup_import_failed", error.to_string()))?;
         let mut archive = ZipArchive::new(file)
@@ -192,7 +188,8 @@ impl BackupRepository {
         source: String,
     ) -> Result<BackupManifest, AppError> {
         let mut entries = Vec::new();
-        for (relative, path) in self.collect_files(&scope)? {
+        let (files, temporary_files) = self.collect_files(&scope)?;
+        for (relative, path) in files {
             let bytes = fs::read(&path)
                 .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?;
             let hash = hash_bytes(&bytes);
@@ -205,14 +202,16 @@ impl BackupRepository {
                 let temporary = object.with_extension(format!("{}.tmp", Uuid::new_v4()));
                 fs::write(&temporary, &bytes)
                     .map_err(|error| AppError::new("backup_write_failed", error.to_string()))?;
-                fs::rename(temporary, &object)
-                    .map_err(|error| AppError::new("backup_write_failed", error.to_string()))?;
+                commit_temporary_file(&temporary, &object, "backup_write_failed")?;
             }
             entries.push(BackupEntry {
                 path: relative,
                 hash,
                 size: bytes.len() as u64,
             });
+        }
+        for path in temporary_files {
+            let _ = fs::remove_file(path);
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
         let manifest = BackupManifest {
@@ -232,42 +231,54 @@ impl BackupRepository {
             format!("{}\n", serde_json::to_string_pretty(&manifest).unwrap()),
         )
         .map_err(|error| AppError::new("backup_write_failed", error.to_string()))?;
-        fs::rename(temporary, destination)
-            .map_err(|error| AppError::new("backup_write_failed", error.to_string()))?;
+        commit_temporary_file(&temporary, &destination, "backup_write_failed")?;
         Ok(manifest)
     }
 
-    fn collect_files(&self, scope: &BackupScope) -> Result<Vec<(String, PathBuf)>, AppError> {
+    fn collect_files(
+        &self,
+        scope: &BackupScope,
+    ) -> Result<(Vec<(String, PathBuf)>, Vec<PathBuf>), AppError> {
+        let data_root = self.vault_root.parent().unwrap_or(&self.vault_root);
         match scope {
             BackupScope::Vault => {
                 let mut files = Vec::new();
-                walk_files(&self.vault_root, &self.vault_root, &mut files)?;
-                Ok(files)
+                let mut temporary_files = Vec::new();
+                if let Ok(pages) = PageRepository::open(self.vault_root.clone()) {
+                    let database = self
+                        .backup_root
+                        .join("staging")
+                        .join(format!("database-{}.sqlite3", Uuid::new_v4()));
+                    pages.snapshot_database(&database)?;
+                    files.push(("qingyu.sqlite3".into(), database.clone()));
+                    temporary_files.push(database);
+                }
+                let attachments = data_root.join("attachments");
+                if attachments.exists() {
+                    walk_files(data_root, &attachments, &mut files, true)?;
+                }
+                // 旧 Markdown 仅作为回退材料随整库备份保留。
+                walk_files(&self.vault_root, &self.vault_root, &mut files, true)?;
+                Ok((files, temporary_files))
             }
             BackupScope::Page { page_id } => {
                 let pages = PageRepository::open(self.vault_root.clone())?;
-                let summary = pages
-                    .list(true)?
-                    .into_iter()
-                    .find(|page| &page.id == page_id)
-                    .ok_or_else(|| AppError::new("page_not_found", "页面不存在"))?;
-                let mut files = vec![(summary.path.clone(), self.vault_root.join(&summary.path))];
-                if summary.kind == PageKind::Database {
-                    let relative = format!(".noteapp/databases/{page_id}.json");
-                    let definition = self.vault_root.join(&relative);
-                    if definition.exists() {
-                        files.push((relative, definition));
-                    }
-                }
-                let assets = self
-                    .vault_root
-                    .join(".noteapp")
-                    .join("assets")
-                    .join(page_id);
+                let bundle = pages.open_bundle(page_id)?;
+                let document_path = self
+                    .backup_root
+                    .join("staging")
+                    .join(format!("page-{page_id}-{}.json", Uuid::new_v4()));
+                fs::write(
+                    &document_path,
+                    serde_json::to_vec_pretty(&bundle.document).unwrap(),
+                )
+                .map_err(|error| AppError::new("backup_write_failed", error.to_string()))?;
+                let mut files = vec![(format!("pages/{page_id}.json"), document_path.clone())];
+                let assets = data_root.join("attachments").join(page_id);
                 if assets.exists() {
-                    walk_files(&self.vault_root, &assets, &mut files)?;
+                    walk_files(data_root, &assets, &mut files, true)?;
                 }
-                Ok(files)
+                Ok((files, vec![document_path]))
             }
         }
     }
@@ -312,6 +323,15 @@ impl BackupRepository {
     }
 
     fn apply_staging(&self, manifest: &BackupManifest, staging: &Path) -> Result<(), AppError> {
+        if staging.join("qingyu.sqlite3").exists() {
+            return self.apply_database_staging(staging);
+        }
+        if let BackupScope::Page { page_id } = &manifest.scope {
+            let document = staging.join("pages").join(format!("{page_id}.json"));
+            if document.exists() {
+                return self.apply_page_staging(page_id, &document, staging);
+            }
+        }
         let current_page_path = if let BackupScope::Page { page_id } = &manifest.scope {
             PageRepository::open(self.vault_root.clone())?
                 .list(true)?
@@ -321,67 +341,203 @@ impl BackupRepository {
         } else {
             None
         };
-        let rollback = staging.join(".rollback");
-        fs::create_dir_all(&rollback)
-            .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+        let expected = manifest
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<HashSet<_>>();
+        let mut removals = Vec::new();
+        if matches!(manifest.scope, BackupScope::Vault) {
+            let mut current_files = Vec::new();
+            walk_files(
+                &self.vault_root,
+                &self.vault_root,
+                &mut current_files,
+                false,
+            )?;
+            for (relative, path) in current_files {
+                if !expected.contains(relative.as_str()) {
+                    removals.push((safe_relative(&relative)?, path));
+                }
+            }
+        } else if let Some(current) = current_page_path {
+            if !expected.contains(current.as_str()) {
+                let relative = safe_relative(&current)?;
+                let path = self.vault_root.join(&relative);
+                if path.exists() {
+                    removals.push((relative, path));
+                }
+            }
+        }
+
+        let rollback = self
+            .vault_root
+            .join(".noteapp")
+            .join("restore-rollback")
+            .join(Uuid::new_v4().to_string());
+        let originals = rollback.join("originals");
+        let removed_root = rollback.join("removed");
         let mut changed = Vec::new();
-        for entry in &manifest.entries {
-            let relative = safe_relative(&entry.path)?;
-            let destination = self.vault_root.join(&relative);
-            let previous = rollback.join(&relative);
-            let existed = destination.exists();
-            if existed {
+        let mut removed = Vec::new();
+        let result = (|| {
+            fs::create_dir_all(&originals)
+                .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+            fs::create_dir_all(&removed_root)
+                .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+
+            for (relative, source) in removals {
+                let previous = removed_root.join(&relative);
                 if let Some(parent) = previous.parent() {
                     fs::create_dir_all(parent).map_err(|error| {
                         AppError::new("backup_restore_failed", error.to_string())
                     })?;
                 }
-                fs::copy(&destination, &previous)
+                fs::rename(&source, &previous)
+                    .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+                removed.push(relative);
+            }
+
+            for entry in &manifest.entries {
+                let relative = safe_relative(&entry.path)?;
+                let destination = self.vault_root.join(&relative);
+                let previous = originals.join(&relative);
+                let existed = destination.exists();
+                if existed {
+                    if let Some(parent) = previous.parent() {
+                        fs::create_dir_all(parent).map_err(|error| {
+                            AppError::new("backup_restore_failed", error.to_string())
+                        })?;
+                    }
+                    fs::copy(&destination, &previous).map_err(|error| {
+                        AppError::new("backup_restore_failed", error.to_string())
+                    })?;
+                }
+                replace_file(&staging.join(&relative), &destination)?;
+                changed.push((relative, existed));
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = result {
+            rollback_changes(&self.vault_root, &originals, &changed);
+            rollback_removed(&self.vault_root, &removed_root, &removed);
+            let _ = fs::remove_dir_all(&rollback);
+            return Err(error);
+        }
+        fs::remove_dir_all(&rollback)
+            .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+        Ok(())
+    }
+
+    fn apply_database_staging(&self, staging: &Path) -> Result<(), AppError> {
+        let pages = PageRepository::open(self.vault_root.clone())?;
+        let data_root = self.vault_root.parent().unwrap_or(&self.vault_root);
+        let attachments = data_root.join("attachments");
+        let previous = data_root.join(format!(".attachments.restore-{}", Uuid::new_v4()));
+        if attachments.exists() {
+            fs::rename(&attachments, &previous)
+                .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+        }
+        let result = (|| {
+            let source = staging.join("attachments");
+            if source.exists() {
+                crate::portable::copy_tree_verified(&source, &attachments)
+                    .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+            } else {
+                fs::create_dir_all(&attachments)
                     .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
             }
-            if let Err(error) = replace_file(&staging.join(&relative), &destination) {
-                rollback_changes(&self.vault_root, &rollback, &changed);
-                return Err(error);
+            pages.restore_database(&staging.join("qingyu.sqlite3"))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&attachments);
+            if previous.exists() {
+                let _ = fs::rename(&previous, &attachments);
             }
-            changed.push((relative, existed));
+        } else if previous.exists() {
+            fs::remove_dir_all(&previous)
+                .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
         }
-        if matches!(manifest.scope, BackupScope::Vault) {
-            let expected = manifest
-                .entries
-                .iter()
-                .map(|entry| entry.path.as_str())
-                .collect::<HashSet<_>>();
-            for (relative, path) in self.collect_files(&BackupScope::Vault)? {
-                if !expected.contains(relative.as_str()) {
-                    fs::remove_file(path).map_err(|error| {
-                        AppError::new("backup_restore_failed", error.to_string())
-                    })?;
-                }
-            }
-        } else if let Some(current) = current_page_path {
-            let expected = manifest
-                .entries
-                .iter()
-                .map(|entry| entry.path.as_str())
-                .collect::<HashSet<_>>();
-            if !expected.contains(current.as_str()) {
-                let path = self.vault_root.join(current);
-                if path.exists() {
-                    fs::remove_file(path).map_err(|error| {
-                        AppError::new("backup_restore_failed", error.to_string())
-                    })?;
-                }
-            }
+        result
+    }
+
+    fn apply_page_staging(
+        &self,
+        page_id: &str,
+        document_path: &Path,
+        staging: &Path,
+    ) -> Result<(), AppError> {
+        let document = serde_json::from_slice(&fs::read(document_path)
+            .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?)
+            .map_err(|error| AppError::new("backup_invalid_page", error.to_string()))?;
+        let pages = PageRepository::open(self.vault_root.clone())?;
+        let data_root = self.vault_root.parent().unwrap_or(&self.vault_root);
+        let attachments = data_root.join("attachments").join(page_id);
+        let previous = data_root.join(format!(".page-assets.restore-{}", Uuid::new_v4()));
+        if attachments.exists() {
+            fs::rename(&attachments, &previous)
+                .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
         }
-        Ok(())
+        let result = (|| {
+            let source = staging.join("attachments").join(page_id);
+            if source.exists() {
+                crate::portable::copy_tree_verified(&source, &attachments)
+                    .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+            }
+            pages.restore_document(document).map(|_| ())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&attachments);
+            if previous.exists() {
+                let _ = fs::rename(&previous, &attachments);
+            }
+        } else if previous.exists() {
+            fs::remove_dir_all(&previous)
+                .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+        }
+        result
     }
 
     fn apply_import(&self, staging: &Path) -> Result<(), AppError> {
         let mut files = Vec::new();
-        walk_files(staging, staging, &mut files)?;
-        for (relative, source) in files {
-            replace_file(&source, &self.vault_root.join(safe_relative(&relative)?))?;
+        walk_files(staging, staging, &mut files, true)?;
+        let rollback = self
+            .vault_root
+            .join(".noteapp")
+            .join("restore-rollback")
+            .join(format!("import-{}", Uuid::new_v4()));
+        let originals = rollback.join("originals");
+        let mut changed = Vec::new();
+        let result = (|| {
+            fs::create_dir_all(&originals)
+                .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
+            for (relative, source) in files {
+                let relative = safe_relative(&relative)?;
+                let destination = self.vault_root.join(&relative);
+                let existed = destination.exists();
+                if existed {
+                    let previous = originals.join(&relative);
+                    if let Some(parent) = previous.parent() {
+                        fs::create_dir_all(parent).map_err(|error| {
+                            AppError::new("backup_restore_failed", error.to_string())
+                        })?;
+                    }
+                    fs::copy(&destination, previous).map_err(|error| {
+                        AppError::new("backup_restore_failed", error.to_string())
+                    })?;
+                }
+                replace_file(&source, &destination)?;
+                changed.push((relative, existed));
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            rollback_changes(&self.vault_root, &originals, &changed);
+            let _ = fs::remove_dir_all(&rollback);
+            return Err(error);
         }
+        fs::remove_dir_all(&rollback)
+            .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))?;
         Ok(())
     }
 
@@ -394,21 +550,46 @@ impl BackupRepository {
             .lock()
             .map_err(|_| AppError::new("backup_lock_failed", "备份存储锁已损坏"))
     }
+
+    fn lock_vault(&self) -> Result<std::sync::MutexGuard<'_, ()>, AppError> {
+        self.vault_lock
+            .lock()
+            .map_err(|_| AppError::new("vault_write_lock_failed", "笔记库写入锁已损坏"))
+    }
 }
 
 fn walk_files(
     root: &Path,
     directory: &Path,
     output: &mut Vec<(String, PathBuf)>,
+    reject_hard_links: bool,
 ) -> Result<(), AppError> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?;
     for entry in fs::read_dir(directory)
         .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?
     {
-        let path = entry
-            .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?
-            .path();
-        if path.is_dir() {
-            walk_files(root, &path, output)?;
+        let entry =
+            entry.map_err(|error| AppError::new("backup_read_failed", error.to_string()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?;
+        if !canonical_path.starts_with(&canonical_root) {
+            continue;
+        }
+        if file_type.is_dir() {
+            walk_files(root, &path, output, reject_hard_links)?;
+            continue;
+        }
+        if reject_hard_links && has_multiple_links(&path)? {
             continue;
         }
         let relative = path
@@ -424,13 +605,55 @@ fn walk_files(
     Ok(())
 }
 
+#[cfg(windows)]
+fn has_multiple_links(path: &Path) -> Result<bool, AppError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let file = fs::File::open(path)
+        .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?;
+    // Windows 标准库尚未稳定暴露链接计数，因此通过只读文件句柄查询元数据。
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let success =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) };
+    if success == 0 {
+        return Err(AppError::new(
+            "backup_read_failed",
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(information.nNumberOfLinks > 1)
+}
+
+#[cfg(not(windows))]
+fn has_multiple_links(path: &Path) -> Result<bool, AppError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| AppError::new("backup_read_failed", error.to_string()))?;
+    Ok(metadata.nlink() > 1)
+}
+
 fn should_skip(relative: &str) -> bool {
-    relative.ends_with(".tmp")
-        || relative.starts_with(".noteapp/restore-staging/")
-        || (relative.starts_with(".noteapp/")
-            && [".db", ".sqlite", ".sqlite3"]
-                .iter()
-                .any(|extension| relative.ends_with(extension)))
+    let normalized = relative.replace('\\', "/").to_ascii_lowercase();
+    let components = normalized.split('/').collect::<Vec<_>>();
+    let file_name = components.last().copied().unwrap_or_default();
+    let sensitive_tree = components.iter().any(|component| {
+        matches!(
+            *component,
+            ".codex" | "ccswitch" | "cc-switch" | "cc_switch"
+        )
+    });
+    sensitive_tree
+        || file_name == "auth.json"
+        || [".db", ".sqlite", ".sqlite3"]
+            .iter()
+            .any(|extension| file_name.ends_with(extension))
+        || normalized.ends_with(".tmp")
+        || normalized.starts_with(".noteapp/restore-staging/")
+        || normalized.starts_with(".noteapp/restore-rollback/")
 }
 
 fn safe_relative(value: &str) -> Result<PathBuf, AppError> {
@@ -461,6 +684,17 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), AppError> {
         .map_err(|error| AppError::new("backup_restore_failed", error.to_string()))
 }
 
+fn commit_temporary_file(
+    temporary: &Path,
+    destination: &Path,
+    error_code: &str,
+) -> Result<(), AppError> {
+    fs::copy(temporary, destination)
+        .map_err(|error| AppError::new(error_code, error.to_string()))?;
+    fs::remove_file(temporary)
+        .map_err(|error| AppError::new(error_code, error.to_string()))
+}
+
 fn rollback_changes(root: &Path, rollback: &Path, changed: &[(PathBuf, bool)]) {
     for (relative, existed) in changed.iter().rev() {
         let destination = root.join(relative);
@@ -469,6 +703,17 @@ fn rollback_changes(root: &Path, rollback: &Path, changed: &[(PathBuf, bool)]) {
         } else {
             let _ = fs::remove_file(destination);
         }
+    }
+}
+
+fn rollback_removed(root: &Path, rollback: &Path, removed: &[PathBuf]) {
+    for relative in removed.iter().rev() {
+        let source = rollback.join(relative);
+        let destination = root.join(relative);
+        if let Some(parent) = destination.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::rename(source, destination);
     }
 }
 
@@ -556,6 +801,47 @@ mod tests {
     }
 
     #[test]
+    fn vault_snapshot_excludes_credentials_databases_and_sensitive_trees() {
+        let (vault, backups) = roots();
+        fs::create_dir_all(vault.join(".codex")).unwrap();
+        fs::create_dir_all(vault.join("CCSwitch")).unwrap();
+        fs::write(vault.join("普通.md"), "正文").unwrap();
+        fs::write(vault.join("auth.json"), "credential").unwrap();
+        fs::write(vault.join("index.sqlite"), "database").unwrap();
+        fs::write(vault.join(".codex").join("secret.txt"), "secret").unwrap();
+        fs::write(vault.join("CCSwitch").join("cc-switch.db"), "database").unwrap();
+        let repo = BackupRepository::open_at(&vault, &backups).unwrap();
+
+        let snapshot = repo.checkpoint(BackupScope::Vault, "manual").unwrap();
+        let paths = snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["普通.md"]);
+        let _ = fs::remove_dir_all(vault.parent().unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vault_snapshot_excludes_hard_linked_files() {
+        let (vault, backups) = roots();
+        fs::create_dir_all(&vault).unwrap();
+        let external = vault.parent().unwrap().join("external-secret.txt");
+        fs::write(&external, "secret").unwrap();
+        fs::hard_link(&external, vault.join("普通附件.txt")).unwrap();
+        fs::write(vault.join("普通.md"), "正文").unwrap();
+        let repo = BackupRepository::open_at(&vault, &backups).unwrap();
+
+        let snapshot = repo.checkpoint(BackupScope::Vault, "manual").unwrap();
+
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].path, "普通.md");
+        let _ = fs::remove_dir_all(vault.parent().unwrap());
+    }
+
+    #[test]
     fn vault_and_page_restore_recover_snapshot_content() {
         let (vault, backups) = roots();
         let pages = PageRepository::open(vault.clone()).unwrap();
@@ -588,6 +874,35 @@ mod tests {
             .unwrap();
         repo.restore(&vault_snapshot.id).unwrap();
         assert_eq!(pages.get(&first.id, false).unwrap().content, "版本一");
+        assert!(repo
+            .list()
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot.source == "beforeRestore"));
+        let _ = fs::remove_dir_all(vault.parent().unwrap());
+    }
+
+    #[test]
+    fn vault_snapshot_captures_committed_wal_data_with_sqlite_online_backup() {
+        let (vault, backups) = roots();
+        let pages = PageRepository::open(vault.clone()).unwrap();
+        let page = pages.create("WAL 页面".into(), None, "第一版".into()).unwrap();
+        pages
+            .update(&page.id, page.title.clone(), "尚未检查点的最新版本".into())
+            .unwrap();
+        assert!(pages.database_path().with_extension("sqlite3-wal").exists());
+        let repo = BackupRepository::open_at(&vault, &backups).unwrap();
+
+        let snapshot = repo.checkpoint(BackupScope::Vault, "manual").unwrap();
+        pages
+            .update(&page.id, page.title, "快照之后".into())
+            .unwrap();
+        repo.restore(&snapshot.id).unwrap();
+
+        assert_eq!(
+            pages.get(&page.id, false).unwrap().content,
+            "尚未检查点的最新版本"
+        );
         let _ = fs::remove_dir_all(vault.parent().unwrap());
     }
 
@@ -599,18 +914,25 @@ mod tests {
         let relative = pages
             .store_asset(&page.id, "image.png", &[137, 80, 78, 71, 13, 10, 26, 10, 1])
             .unwrap();
-        let asset = vault.join(relative.trim_start_matches('/'));
+        let file_name = Path::new(&relative).file_name().unwrap();
+        let manifest_path = format!("attachments/{}/{}", page.id, file_name.to_string_lossy());
+        let asset = vault
+            .parent()
+            .unwrap()
+            .join("attachments")
+            .join(&page.id)
+            .join(file_name);
         let repo = BackupRepository::open_at(&vault, &backups).unwrap();
 
         let vault_snapshot = repo.checkpoint(BackupScope::Vault, "manual").unwrap();
         assert!(vault_snapshot
             .entries
             .iter()
-            .any(|entry| entry.path == relative.trim_start_matches('/')));
+            .any(|entry| entry.path == manifest_path));
         let zip_path = vault.parent().unwrap().join("assets.zip");
         repo.export_zip(&zip_path).unwrap();
         let mut archive = ZipArchive::new(fs::File::open(&zip_path).unwrap()).unwrap();
-        assert!(archive.by_name(relative.trim_start_matches('/')).is_ok());
+        assert!(archive.by_name(&manifest_path).is_ok());
         drop(archive);
 
         let snapshot = repo
@@ -624,7 +946,7 @@ mod tests {
         assert!(snapshot
             .entries
             .iter()
-            .any(|entry| entry.path == relative.trim_start_matches('/')));
+            .any(|entry| entry.path == manifest_path));
 
         fs::write(&asset, b"changed").unwrap();
         repo.restore(&snapshot.id).unwrap();
@@ -670,6 +992,33 @@ mod tests {
     }
 
     #[test]
+    fn failed_zip_import_rolls_back_files_already_replaced() {
+        let (vault, backups) = roots();
+        fs::create_dir_all(vault.join("blocked.md")).unwrap();
+        fs::write(vault.join("a.md"), "导入前").unwrap();
+        let archive_path = vault.parent().unwrap().join("partial.zip");
+        let file = fs::File::create(&archive_path).unwrap();
+        let mut archive = ZipWriter::new(file);
+        archive
+            .start_file("a.md", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all("导入后".as_bytes()).unwrap();
+        archive
+            .start_file("blocked.md", SimpleFileOptions::default())
+            .unwrap();
+        archive.write_all(b"blocked").unwrap();
+        archive.finish().unwrap();
+        let repo = BackupRepository::open_at(&vault, &backups).unwrap();
+
+        let error = repo.import_zip(&archive_path).unwrap_err();
+
+        assert_eq!(error.code, "backup_restore_failed");
+        assert_eq!(fs::read_to_string(vault.join("a.md")).unwrap(), "导入前");
+        assert!(vault.join("blocked.md").is_dir());
+        let _ = fs::remove_dir_all(vault.parent().unwrap());
+    }
+
+    #[test]
     fn malformed_manifest_hash_is_rejected_without_panic() {
         assert!(validate_hash("x").is_err());
         assert!(validate_hash("../outside").is_err());
@@ -692,6 +1041,74 @@ mod tests {
         let error = repo.export_zip(&target).unwrap_err();
         assert_eq!(error.code, "backup_export_unsafe_path");
         assert!(!target.exists());
+        let _ = fs::remove_dir_all(vault.parent().unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vault_restore_rolls_back_replacements_when_extra_file_cannot_be_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let (vault, backups) = roots();
+        fs::create_dir_all(&vault).unwrap();
+        fs::write(vault.join("笔记.md"), "快照内容").unwrap();
+        let repo = BackupRepository::open_at(&vault, &backups).unwrap();
+        let snapshot = repo.checkpoint(BackupScope::Vault, "manual").unwrap();
+        fs::write(vault.join("笔记.md"), "恢复前内容").unwrap();
+        let locked_path = vault.join("锁定.md");
+        fs::write(&locked_path, "不能删除").unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked_path)
+            .unwrap();
+
+        let staging = repo.rebuild_staging(&snapshot).unwrap();
+        let error = repo.apply_staging(&snapshot, &staging).unwrap_err();
+        drop(locked);
+
+        assert_eq!(error.code, "backup_restore_failed");
+        assert_eq!(
+            fs::read_to_string(vault.join("笔记.md")).unwrap(),
+            "恢复前内容"
+        );
+        assert_eq!(fs::read_to_string(&locked_path).unwrap(), "不能删除");
+        let _ = fs::remove_dir_all(staging);
+        let _ = fs::remove_dir_all(vault.parent().unwrap());
+    }
+
+    #[test]
+    fn restore_lock_blocks_page_writes_until_the_transaction_finishes() {
+        let (vault, backups) = roots();
+        let pages = PageRepository::open(vault.clone()).unwrap();
+        let page = pages.create("页面".into(), None, "旧内容".into()).unwrap();
+        let backups = BackupRepository::open_at(&vault, &backups).unwrap();
+        let guard = backups.lock_vault().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = pages.update_checked(
+                &page.id,
+                page.title.clone(),
+                "新内容".into(),
+                &page.title,
+                &page.content,
+            );
+            let _ = sender.send(result);
+        });
+
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        drop(guard);
+        assert_eq!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+                .content,
+            "新内容"
+        );
+        worker.join().unwrap();
         let _ = fs::remove_dir_all(vault.parent().unwrap());
     }
 }

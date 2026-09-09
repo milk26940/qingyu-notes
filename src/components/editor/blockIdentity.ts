@@ -2,7 +2,7 @@ import { StateEffect, StateField } from "@codemirror/state";
 import { Decoration, EditorView, MatchDecorator, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 
 const BLOCK_LINE = /^<!-- qy:block:([0-9a-fA-F-]{36}) -->$/;
-const BLOCK_MARKER = /^<!-- qy:block:([0-9a-fA-F-]{36}) -->$/gm;
+const BLOCK_MARKER = /<!--\s*qy:block:([0-9a-fA-F-]{36})\s*-->/g;
 
 export type MarkdownBlock = { id: string; from: number; to: number; markerFrom: number; markerTo: number; text: string };
 
@@ -89,9 +89,8 @@ const blockHighlightField = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
-const markerMatcher = new MatchDecorator({ regexp: /^<!-- qy:block:[0-9a-fA-F-]{36} -->$/gm, decoration: (match, view, position) => {
-  const cursor = view.state.selection.main.head;
-  return cursor >= position && cursor <= position + match[0].length ? null : Decoration.replace({});
+const markerMatcher = new MatchDecorator({ regexp: /<!--\s*qy:block:[0-9a-fA-F-]{36}\s*-->/g, decoration: () => {
+  return Decoration.replace({});
 } });
 
 const hiddenMarkers = ViewPlugin.fromClass(class {

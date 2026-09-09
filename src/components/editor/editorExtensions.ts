@@ -7,13 +7,14 @@ import { pageMentionExtensions, type PageMentionConfig } from "./pageMentions";
 import { blockIdentityExtensions } from "./blockIdentity";
 import { notionDecorations } from "./notionDecorations";
 import type { EditorSelection } from "./InlineAgentMenu";
+import { deleteImageAtCursor } from "./imageDeletion";
 
 export const editorTheme = EditorView.theme({
-  "&": { height: "100%", fontSize: "calc(15px * var(--qy-font-scale))", color: "var(--qy-ink)" },
-  ".cm-scroller": { fontFamily: '"Inter Variable", Inter, ui-sans-serif, system-ui, sans-serif', overflow: "auto" },
-  ".cm-content": { padding: "28px 32px", minHeight: "100%" },
+  "&": { height: "auto", minHeight: "calc(100vh - 190px)", fontSize: "calc(15px * var(--qy-font-scale))", color: "var(--qy-ink)" },
+  ".cm-scroller": { fontFamily: '"Qingyu Source Han Sans", "Microsoft YaHei UI", "Segoe UI Emoji", sans-serif', overflow: "visible" },
+  ".cm-content": { padding: "28px 32px", minHeight: "calc(100vh - 190px)", outline: "none" },
   ".cm-gutters": { display: "none" },
-  ".cm-focused": { outline: "none" },
+  "&.cm-focused": { outline: "none" },
   ".qy-page-mention": { color: "var(--qy-accent)", backgroundColor: "#eff6ff", borderRadius: "3px", cursor: "pointer" },
   ".qy-page-mention-missing": { color: "#b42318", backgroundColor: "#fef3f2", textDecoration: "line-through" },
   ".qy-block-highlight": { backgroundColor: "#fef3c7", borderRadius: "3px" },
@@ -33,5 +34,9 @@ export const editorTheme = EditorView.theme({
 });
 
 export function createEditorExtensions(onChange: (value: string) => void, readOnly = false, mentions?: PageMentionConfig, onSelectionChange?: (selection: EditorSelection) => void) {
-  return [markdown(), history(), keymap.of([...defaultKeymap, ...historyKeymap]), EditorView.lineWrapping, syntaxHighlighting(defaultHighlightStyle), editorTheme, blockIdentityExtensions, notionDecorations, mentions ? pageMentionExtensions(mentions) : [], EditorState.readOnly.of(readOnly), EditorView.updateListener.of((update) => { if (update.docChanged) onChange(update.state.doc.toString()); if (update.docChanged || update.selectionSet) { const selection = update.state.selection.main; onSelectionChange?.({ from: selection.from, to: selection.to }); } })];
+  const imageDeletionKeymap = readOnly ? [] : [
+    { key: "Backspace", run: (view: EditorView) => deleteImageAtCursor(view, "backward") },
+    { key: "Delete", run: (view: EditorView) => deleteImageAtCursor(view, "forward") },
+  ];
+  return [markdown(), history(), keymap.of([...imageDeletionKeymap, ...defaultKeymap, ...historyKeymap]), EditorView.lineWrapping, syntaxHighlighting(defaultHighlightStyle), editorTheme, blockIdentityExtensions, notionDecorations, mentions ? pageMentionExtensions(mentions) : [], EditorState.readOnly.of(readOnly), EditorView.updateListener.of((update) => { if (update.docChanged) onChange(update.state.doc.toString()); if (update.docChanged || update.selectionSet) { const selection = update.state.selection.main; onSelectionChange?.({ from: selection.from, to: selection.to }); } })];
 }

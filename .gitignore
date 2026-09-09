@@ -8,6 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules/
+data/
 dist/
 dist-ssr/
 *.local
@@ -15,6 +16,10 @@ dist-ssr/
 .worktrees/
 .superpowers/
 .tmp/
+source-backups/
+.qingyu-migration-audit-*/
+.local-history/
+/qingyu-notes-dev.exe
 
 # Rust/Tauri build output
 src-tauri/target/

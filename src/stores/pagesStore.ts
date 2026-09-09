@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/pages";
-import type { Page, PageHistoryEntry, PageLink, PageSummary, SearchResult, VaultChange } from "../lib/tauri/pages";
+import * as databaseApi from "../lib/tauri/databases";
+import type { Page, PageDocument, PageHistoryEntry, PageLink, PageSummary, ProjectionStatus, SearchResult, VaultChange } from "../lib/tauri/pages";
 
 type SaveState = "idle" | "dirty" | "saving" | "saved" | "error" | "conflict";
 type PagesStore = {
@@ -8,6 +9,9 @@ type PagesStore = {
   pages: PageSummary[];
   trash: PageSummary[];
   activePage: Page | null;
+  openingPageId: string | null;
+  activeDocument: PageDocument | null;
+  persistedPage: Page | null;
   targetBlockId: string | null;
   links: PageLink[];
   backlinks: PageLink[];
@@ -16,36 +20,230 @@ type PagesStore = {
   searchQuery: string;
   saveState: SaveState;
   error: string | null;
+  projectionStatus: ProjectionStatus;
+  setProjectionStatus: (status: ProjectionStatus) => void;
   reportError: (message: string) => void;
   init: (path?: string) => Promise<void>;
   refresh: () => Promise<void>;
   open: (id: string, targetBlockId?: string | null) => Promise<void>;
+  reload: (id: string) => Promise<void>;
+  prefetch: (id: string) => void;
   create: (title?: string, parentId?: string | null) => Promise<void>;
+  createLinkedChild: (kind: "page" | "database", position: number) => Promise<void>;
   edit: (content: string) => void;
+  editDocument: (document: PageDocument) => void;
   editTitle: (title: string) => void;
   save: () => Promise<void>;
   move: (id: string, parentId: string | null, sortOrder?: number) => Promise<void>;
   trashPage: (id: string) => Promise<void>;
+  trashPageRecursive: (id: string) => Promise<void>;
   restore: (id: string) => Promise<void>;
+  purge: (id: string) => Promise<void>;
   search: (query: string) => Promise<void>;
   handleExternalChange: (change: VaultChange) => Promise<void>;
+  discardConflictAndReload: () => Promise<void>;
+  keepConflictAsCopy: () => Promise<void>;
 };
 
 const failure = (error: unknown) => (typeof error === "object" && error && "message" in error ? String(error.message) : String(error));
+let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let saveInFlight: Promise<void> | null = null;
+let openSequence = 0;
+const pageBundleCache = new Map<string, Awaited<ReturnType<typeof api.openPageBundle>>>();
+
+const cancelAutoSave = () => {
+  if (autoSaveTimer != null) clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+};
+
+const scheduleAutoSave = (save: () => Promise<void>) => {
+  cancelAutoSave();
+  autoSaveTimer = setTimeout(() => {
+    autoSaveTimer = null;
+    void save();
+  }, 180_000);
+};
+
+const flushPendingSave = async (get: () => PagesStore) => {
+  cancelAutoSave();
+  if (saveInFlight) await saveInFlight;
+  if (get().saveState === "dirty") await get().save();
+  return !["dirty", "saving", "error", "conflict"].includes(get().saveState);
+};
 
 export const usePagesStore = create<PagesStore>((set, get) => ({
-  vaultPath: null, pages: [], trash: [], activePage: null, targetBlockId: null, links: [], backlinks: [], history: [], searchResults: [], searchQuery: "", saveState: "idle", error: null,
+  openingPageId: null,
+  vaultPath: null, pages: [], trash: [], activePage: null, activeDocument: null, persistedPage: null, targetBlockId: null, links: [], backlinks: [], history: [], searchResults: [], searchQuery: "", saveState: "idle", error: null, projectionStatus: { state: "initializing" },
+  setProjectionStatus: (projectionStatus) => set({ projectionStatus }),
   reportError: (error) => set({ error }),
-  init: async (path) => { try { const vaultPath = await api.initVault(path); set({ vaultPath, error: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
+  init: async (path) => {
+    const currentPath = get().vaultPath;
+    if (currentPath && path && path !== currentPath && !(await flushPendingSave(get))) return;
+    try {
+      set({ projectionStatus: { state: "initializing" } });
+      const vaultPath = await api.initVault(path);
+      set({ vaultPath, pages: [], trash: [], activePage: null, activeDocument: null, persistedPage: null, targetBlockId: null, links: [], backlinks: [], history: [], searchResults: [], searchQuery: "", saveState: "idle", error: null, projectionStatus: { state: "ready" } });
+      await get().refresh();
+    } catch (error) {
+      set({ error: failure(error) });
+    }
+  },
   refresh: async () => { try { const [pages, trash] = await Promise.all([api.listPages(), api.listPages(true)]); set({ pages: pages.filter((page) => !page.trashedAt), trash: trash.filter((page) => page.trashedAt), error: null }); } catch (error) { set({ error: failure(error) }); } },
-  open: async (id, targetBlockId = null) => { try { const [activePage, links, backlinks, history] = await Promise.all([api.getPage(id), api.getPageLinks(id), api.getPageBacklinks(id), api.getPageHistory(id)]); set({ activePage, targetBlockId, links, backlinks, history, saveState: "idle", error: null }); } catch (error) { set({ error: failure(error) }); } },
-  create: async (title = "未命名页面", parentId = null) => { try { const page = await api.createPage(title, parentId, ""); set({ activePage: page, saveState: "saved", error: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
-  edit: (content) => set((state) => state.activePage ? { activePage: { ...state.activePage, content }, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state),
-  editTitle: (title) => set((state) => state.activePage ? { activePage: { ...state.activePage, title }, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state),
-  save: async () => { const page = get().activePage; if (!page || get().saveState === "saving") return; if (get().saveState === "conflict") { set({ error: "Agent 已修改磁盘版本，请重新打开页面后再编辑" }); return; } set({ saveState: "saving" }); try { const activePage = await api.updatePage(page.id, page.title, page.content); const [links, backlinks, history] = await Promise.all([api.getPageLinks(activePage.id), api.getPageBacklinks(activePage.id), api.getPageHistory(activePage.id)]); set({ activePage, links, backlinks, history, saveState: "saved", error: null }); await get().refresh(); } catch (error) { set({ saveState: "error", error: failure(error) }); } },
-  move: async (id, parentId, sortOrder = 0) => { try { await api.movePage(id, parentId, sortOrder); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
-  trashPage: async (id) => { try { await api.trashPage(id); set({ activePage: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
+  prefetch: (id) => {
+    if (pageBundleCache.has(id) || get().activePage?.id === id) return;
+    void api.openPageBundle(id).then((bundle) => pageBundleCache.set(id, bundle)).catch(() => undefined);
+  },
+  open: async (id, targetBlockId = null) => {
+    const sequence = ++openSequence;
+    if (get().activePage?.id === id && !targetBlockId) { set({ openingPageId: null }); return; }
+    set({ openingPageId: id });
+    if (!(await flushPendingSave(get))) { if (sequence === openSequence) set({ openingPageId: null }); return; }
+    if (sequence !== openSequence) return;
+    try {
+      const cached = pageBundleCache.get(id);
+      if (cached) {
+        set({ activePage: cached.page, activeDocument: cached.document, persistedPage: cached.page, targetBlockId, links: cached.links, backlinks: cached.backlinks, history: [], saveState: "idle", error: null });
+        pageBundleCache.delete(id);
+        void api.openPageBundle(id).then((bundle) => pageBundleCache.set(id, bundle)).catch(() => undefined);
+        return;
+      }
+      const bundle = await api.openPageBundle(id);
+      if (sequence !== openSequence) return;
+      set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, targetBlockId, links: bundle.links, backlinks: bundle.backlinks, history: [], saveState: "idle", error: null });
+    } catch (error) { if (sequence === openSequence) set({ error: failure(error) }); }
+    finally { if (sequence === openSequence) set({ openingPageId: null }); }
+  },
+  reload: async (id) => {
+    if (get().saveState === "dirty" || get().saveState === "saving" || get().saveState === "conflict") return;
+    try {
+      const bundle = await api.openPageBundle(id);
+      if (get().activePage?.id !== id) return;
+      set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, targetBlockId: null, links: bundle.links, backlinks: bundle.backlinks, saveState: "saved", error: null });
+      pageBundleCache.delete(id);
+      await get().refresh();
+    } catch (error) { set({ error: failure(error) }); }
+  },
+  create: async (title = "未命名页面", parentId = null) => { if (!(await flushPendingSave(get))) return; try { const page = await api.createPage(title, parentId, ""); const bundle = await api.openPageBundle(page.id); set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, links: bundle.links, backlinks: bundle.backlinks, saveState: "saved", error: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
+  createLinkedChild: async (kind, position) => {
+    if (!(await flushPendingSave(get))) return;
+    const parent = get().activePage;
+    if (!parent || parent.kind === "database") return;
+    let child: Page | null = null;
+    try {
+      child = kind === "database" ? (await databaseApi.createDatabase("未命名数据库", parent.id)).page : await api.createPage("未命名页面", parent.id, "");
+      const parentDocument = get().activeDocument;
+      if (!parentDocument || parentDocument.pageId !== parent.id) throw new Error("当前页面缺少区块文档");
+      const linkBlock = {
+        id: crypto.randomUUID(), type: "paragraph", text: child.title, children: [],
+        attrs: { node: { type: "paragraph", content: [{ type: "text", text: child.title, marks: [{ type: "link", attrs: { href: `qingyu://page/${child.id}` } }, { type: "bold" }] }] } },
+      };
+      const insertAt = Math.max(0, Math.min(position, parentDocument.blocks.length));
+      const blocks = [...parentDocument.blocks];
+      blocks.splice(insertAt, 0, linkBlock);
+      await api.savePageDocument({ ...parentDocument, blocks }, parentDocument.revision);
+      const bundle = await api.openPageBundle(child.id);
+      set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, links: bundle.links, backlinks: bundle.backlinks, saveState: "saved", error: null });
+      await get().refresh();
+    } catch (error) {
+      if (child) { try { await api.trashPage(child.id); } catch { /* 回滚失败由原始错误统一提示。 */ } }
+      set({ error: failure(error) });
+    }
+  },
+  edit: (content) => { set((state) => state.activePage ? { activePage: { ...state.activePage, content }, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state); if (get().saveState === "dirty") scheduleAutoSave(get().save); },
+  editDocument: (document) => { set((state) => state.activePage ? { activeDocument: document, activePage: { ...state.activePage, content: document.blocks.map((block) => block.text).filter(Boolean).join("\n") }, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state); if (get().saveState === "dirty") scheduleAutoSave(get().save); },
+  editTitle: (title) => { set((state) => state.activePage ? { activePage: { ...state.activePage, title }, activeDocument: state.activeDocument ? { ...state.activeDocument, title } : null, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state); if (get().saveState === "dirty") scheduleAutoSave(get().save); },
+  save: () => {
+    cancelAutoSave();
+    if (saveInFlight) return saveInFlight;
+    const page = get().activePage;
+    const document = get().activeDocument;
+    if (!page) return Promise.resolve();
+    if (get().saveState === "conflict") { set({ error: "Agent 已修改磁盘版本，请重新打开页面后再编辑" }); return Promise.resolve(); }
+    const task = (async () => {
+      set({ saveState: "saving" });
+      try {
+        if (document && document.pageId === page.id) {
+          const savedDocument = await api.savePageDocument(document, document.revision);
+          const current = get().activeDocument;
+          if (current?.pageId === document.pageId && current === document) {
+            set({ activeDocument: savedDocument, persistedPage: { ...page, content: savedDocument.blocks.map((block) => block.text).filter(Boolean).join("\n") }, saveState: "saved", error: null });
+          } else if (current?.pageId === document.pageId) {
+            set({ activeDocument: { ...current, revision: savedDocument.revision }, saveState: "dirty", error: null });
+            scheduleAutoSave(get().save);
+          }
+          await get().refresh();
+          return;
+        }
+        const persisted = get().persistedPage;
+        if (!persisted || persisted.id !== page.id) throw new Error("缺少页面保存基线，请重新打开页面");
+        const savedPage = await api.updatePage(page.id, page.title, page.content, persisted.title, persisted.content);
+        const [links, backlinks, history] = await Promise.all([api.getPageLinks(savedPage.id), api.getPageBacklinks(savedPage.id), api.getPageHistory(savedPage.id)]);
+        const current = get().activePage;
+        const unchanged = current?.id === page.id && current.title === page.title && current.content === page.content;
+        if (unchanged) set({ activePage: savedPage, persistedPage: savedPage, links, backlinks, history, saveState: "saved", error: null });
+        else if (current?.id === page.id) { set({ persistedPage: savedPage, links, backlinks, history, saveState: "dirty", error: null }); scheduleAutoSave(get().save); }
+        await get().refresh();
+      } catch (error) {
+        const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
+        set({ saveState: code === "page_write_conflict" ? "conflict" : "error", error: failure(error) });
+      }
+    })();
+    saveInFlight = task.finally(() => { saveInFlight = null; });
+    return saveInFlight;
+  },
+  move: async (id, parentId, sortOrder = 0) => { if (!(await flushPendingSave(get))) return; try { await api.movePage(id, parentId, sortOrder); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
+  trashPage: async (id) => { if (!(await flushPendingSave(get))) return; try { await api.trashPage(id); set({ activePage: null, activeDocument: null, persistedPage: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
+  trashPageRecursive: async (id) => { if (!(await flushPendingSave(get))) return; try { await api.trashPageRecursive(id); set({ activePage: null, activeDocument: null, persistedPage: null, targetBlockId: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
   restore: async (id) => { try { await api.restorePage(id); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
+  purge: async (id) => { try { await api.purgePage(id); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
   search: async (query) => { set({ searchQuery: query }); if (!query.trim()) { set({ searchResults: [] }); return; } try { set({ searchResults: await api.searchPages(query), error: null }); } catch (error) { set({ error: failure(error) }); } },
-  handleExternalChange: async (_change) => { const active = get().activePage; await get().refresh(); if (!active) return; if (get().saveState === "dirty" || get().saveState === "conflict") { set({ saveState: "conflict", error: "Agent 已修改笔记库；当前未保存内容未被覆盖，请重新打开页面核对" }); return; } try { await api.getPage(active.id); await get().open(active.id); } catch { set({ activePage: null, saveState: "idle" }); } },
+  handleExternalChange: async (change) => {
+    const active = get().activePage;
+    await get().refresh();
+    if (!active) return;
+    if (change.pageIds.length > 0 && !change.pageIds.includes(active.id)) return;
+    if (get().saveState === "dirty" || get().saveState === "conflict") {
+      try {
+        const diskPage = await api.getPage(active.id);
+        const persisted = get().persistedPage;
+        if (persisted && diskPage.title === persisted.title && diskPage.content === persisted.content) return;
+      } catch {
+        // 页面在磁盘上被删除时也需要保留编辑缓冲。
+      }
+      cancelAutoSave();
+      set({ saveState: "conflict", error: "磁盘版本已发生变化；当前未保存内容已保留，请重新打开页面核对" });
+      return;
+    }
+    try { await api.getPage(active.id); await get().open(active.id); } catch { set({ activePage: null, activeDocument: null, persistedPage: null, saveState: "idle" }); }
+  },
+  discardConflictAndReload: async () => {
+    const active = get().activePage;
+    if (!active || get().saveState !== "conflict") return;
+    cancelAutoSave();
+    try {
+      const [diskPage, bundle, history] = await Promise.all([
+        api.getPage(active.id),
+        api.openPageBundle(active.id),
+        api.getPageHistory(active.id),
+      ]);
+      const validBundle = bundle.page.id === diskPage.id;
+      set({ activePage: diskPage, activeDocument: validBundle ? bundle.document : null, persistedPage: diskPage, links: validBundle ? bundle.links : [], backlinks: validBundle ? bundle.backlinks : [], history, saveState: "idle", error: null });
+    } catch (error) {
+      set({ error: failure(error) });
+    }
+  },
+  keepConflictAsCopy: async () => {
+    const active = get().activePage;
+    if (!active || get().saveState !== "conflict") return;
+    cancelAutoSave();
+    try {
+      const copy = await api.createPage(`${active.title} (本地副本)`, active.parentId, active.content);
+      const bundle = await api.openPageBundle(copy.id);
+      const validBundle = bundle.page.id === copy.id;
+      set({ activePage: copy, activeDocument: validBundle ? bundle.document : null, persistedPage: copy, links: validBundle ? bundle.links : [], backlinks: validBundle ? bundle.backlinks : [], history: [], saveState: "saved", error: null });
+      await get().refresh();
+    } catch (error) {
+      set({ error: failure(error) });
+    }
+  },
 }));

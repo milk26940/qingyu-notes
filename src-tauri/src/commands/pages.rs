@@ -1,16 +1,21 @@
-use std::path::PathBuf;
-
+use notify::RecommendedWatcher;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
+use crate::backup::model::BackupScope;
+use crate::backup::repository::BackupRepository;
 use crate::error::AppError;
-use crate::pages::model::{Page, PageHistoryEntry, PageLink, PageSummary, SearchResult};
+use crate::pages::model::{Page, PageDocument, PageHistoryEntry, PageLink, PageOpenBundle, PageSummary, SearchResult};
 use crate::pages::repository::PageRepository;
+use crate::pages::watcher::watch_vault;
+use crate::projection::SearchProjection;
 
 #[derive(Default)]
 pub struct PageState {
     pub repository: Mutex<Option<PageRepository>>,
+    watcher: Mutex<Option<RecommendedWatcher>>,
+    projection: Mutex<Option<SearchProjection>>,
 }
 
 #[derive(Serialize)]
@@ -22,14 +27,49 @@ pub struct PageAssetData {
 
 #[tauri::command]
 pub async fn vault_init(
-    path: Option<String>,
+    _path: Option<String>,
     state: State<'_, PageState>,
+    app: AppHandle,
 ) -> Result<String, AppError> {
-    let root = path
-        .map(PathBuf::from)
-        .unwrap_or_else(PageRepository::default_root);
+    let root = PageRepository::default_root();
     let repo = PageRepository::open(root.clone())?;
+    crate::semantic::knowledge::repair_empty_wiki(&repo)?;
+    let projection = SearchProjection::open(&root)?;
+    projection.rebuild(&repo)?;
+    let event_app = app.clone();
+    let event_repo = repo.clone();
+    let event_projection = projection.clone();
+    let watcher = watch_vault(&root, move |paths| {
+        let projection_status = match event_projection.rebuild(&event_repo) {
+            Ok(()) => serde_json::json!({ "state": "ready" }),
+            Err(error) => {
+                serde_json::json!({ "state": "failed", "code": error.code, "message": error.message })
+            }
+        };
+        let _ = event_app.emit("projection://status", projection_status);
+        let paths = paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect::<Vec<_>>();
+        let _ = event_app.emit(
+            "vault://changed",
+            serde_json::json!({
+                "source": "external",
+                "namespace": "filesystem",
+                "tool": "change",
+                "paths": paths,
+                "pageIds": [],
+                "databaseIds": []
+            }),
+        );
+    })?;
     *state.repository.lock().await = Some(repo);
+    *state.watcher.lock().await = Some(watcher);
+    *state.projection.lock().await = Some(projection);
+    let _ = app.emit(
+        "projection://status",
+        serde_json::json!({ "state": "ready" }),
+    );
     Ok(root.to_string_lossy().to_string())
 }
 
@@ -60,6 +100,23 @@ pub async fn page_get(
 }
 
 #[tauri::command]
+pub async fn page_open_bundle(
+    state: State<'_, PageState>,
+    id: String,
+) -> Result<PageOpenBundle, AppError> {
+    repo(&state).await?.open_bundle(&id)
+}
+
+#[tauri::command]
+pub async fn page_save_document(
+    state: State<'_, PageState>,
+    document: PageDocument,
+    expected_revision: i64,
+) -> Result<PageDocument, AppError> {
+    repo(&state).await?.save_document(document, expected_revision)
+}
+
+#[tauri::command]
 pub async fn page_create(
     state: State<'_, PageState>,
     title: String,
@@ -75,8 +132,12 @@ pub async fn page_update(
     id: String,
     title: String,
     content: String,
+    expected_title: String,
+    expected_content: String,
 ) -> Result<Page, AppError> {
-    repo(&state).await?.update(&id, title, content)
+    repo(&state)
+        .await?
+        .update_checked(&id, title, content, &expected_title, &expected_content)
 }
 
 #[tauri::command]
@@ -116,8 +177,21 @@ pub async fn page_trash(state: State<'_, PageState>, id: String) -> Result<Page,
 }
 
 #[tauri::command]
+pub async fn page_trash_recursive(state: State<'_, PageState>, id: String) -> Result<Page, AppError> {
+    repo(&state).await?.trash_recursive(&id)
+}
+
+#[tauri::command]
 pub async fn page_restore(state: State<'_, PageState>, id: String) -> Result<Page, AppError> {
     repo(&state).await?.restore(&id)
+}
+
+#[tauri::command]
+pub async fn page_purge(state: State<'_, PageState>, id: String) -> Result<(), AppError> {
+    let pages = repo(&state).await?;
+    BackupRepository::open(pages.root())?
+        .checkpoint(BackupScope::Vault, "beforePermanentDelete")?;
+    pages.purge(&id)
 }
 
 #[tauri::command]

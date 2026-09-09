@@ -4,7 +4,9 @@ import { DatabaseRecordProperties, DatabaseTable } from "./DatabaseTable";
 import type { Page } from "../../lib/tauri/pages";
 
 const updateRecord = vi.hoisted(() => vi.fn());
+const rename = vi.hoisted(() => vi.fn());
 const openDatabase = vi.hoisted(() => vi.fn());
+const openPage = vi.hoisted(() => vi.fn());
 const state = vi.hoisted(() => ({
   bundle: {
     page: { id: "db-1", title: "任务", kind: "database" },
@@ -14,15 +16,15 @@ const state = vi.hoisted(() => ({
     ], views: [], createdAt: "0", updatedAt: "0" },
   },
   records: [{ id: "record-1", title: "记录", kind: "databaseRecord", databaseId: "db-1", properties: { "field-1": "旧值", "field-2": [] } }],
-  filters: [], sorts: [], open: openDatabase, addField: vi.fn(), addRecord: vi.fn(), updateRecord,
+  filters: [], sorts: [], open: openDatabase, addField: vi.fn(), addRecord: vi.fn(), updateRecord, rename,
   setFilters: vi.fn(), setSorts: vi.fn(),
 }));
 
 vi.mock("../../stores/databaseStore", () => ({ useDatabaseStore: (selector?: (value: typeof state) => unknown) => selector ? selector(state) : state }));
-vi.mock("../../stores/pagesStore", () => ({ usePagesStore: (selector: (value: { open: () => void; pages: Array<{ id: string; title: string }> }) => unknown) => selector({ open: vi.fn(), pages: [{ id: "page-2", title: "目标页面" }] }) }));
+vi.mock("../../stores/pagesStore", () => ({ usePagesStore: (selector: (value: { open: () => void; pages: Array<{ id: string; title: string }> }) => unknown) => selector({ open: openPage, pages: [{ id: "page-2", title: "目标页面" }] }) }));
 
 describe("DatabaseTable", () => {
-  beforeEach(() => { updateRecord.mockReset(); openDatabase.mockReset(); });
+  beforeEach(() => { updateRecord.mockReset(); openDatabase.mockReset(); openPage.mockReset(); });
   afterEach(cleanup);
 
   it("commits an inline property edit to the record page", () => {
@@ -56,5 +58,21 @@ describe("DatabaseTable", () => {
     expect(screen.getByText("说明")).toBeInTheDocument();
     expect(screen.getByDisplayValue("旧值")).toBeInTheDocument();
     expect(screen.getByText("关联")).toBeInTheDocument();
+  });
+
+  it("opens a record page with one title click", () => {
+    render(<DatabaseTable databaseId="db-1" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "打开记录" }));
+
+    expect(openPage).toHaveBeenCalledWith("record-1");
+  });
+
+  it("失焦后保存数据库名称", () => {
+    render(<DatabaseTable databaseId="db-1" />);
+    const title = screen.getByLabelText("数据库名称");
+    fireEvent.change(title, { target: { value: "新的数据库名称" } });
+    fireEvent.blur(title);
+    expect(rename).toHaveBeenCalledWith("新的数据库名称");
   });
 });

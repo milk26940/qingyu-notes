@@ -1,25 +1,52 @@
-import { Archive, Database, FileText, Inbox, Search, Star, Trash2 } from "lucide-react";
+import { BookOpen, FileText, Search } from "lucide-react";
 import { PageTree } from "../pages/PageTree";
-import { useDatabaseStore } from "../../stores/databaseStore";
+import { useState } from "react";
 
 const items = [
-  [Search, "搜索"], [Inbox, "收件箱"], [Star, "收藏"], [FileText, "页面"], [Database, "数据库"], [Trash2, "回收站"], [Archive, "归档"],
+  [Search, "搜索"],
+  [FileText, "页面"],
+  [BookOpen, "知识 Wiki"],
 ] as const;
 
-export function Sidebar() {
-  const createDatabase = useDatabaseStore((state) => state.create);
+export type SidebarNav = "搜索" | "页面" | "知识 Wiki";
+
+export function Sidebar({
+  activeNav,
+  onNavigate,
+  onOpenPage,
+}: {
+  activeNav?: SidebarNav;
+  onNavigate?: (label: SidebarNav) => void;
+  onOpenPage?: (pageId: string) => void;
+}) {
+  const [selectedNav, setSelectedNav] = useState<SidebarNav>("页面");
+  const currentNav = activeNav ?? selectedNav;
   return (
-    <aside className="min-h-0 overflow-y-auto bg-[var(--qy-sidebar)] px-2 py-3" aria-label="工作区导航">
-      <div className="mb-5 px-2 text-[15px] font-semibold tracking-normal">轻羽</div>
+    <aside
+      className="flex min-h-0 flex-col overflow-hidden rounded-[22px] border border-white bg-[var(--qy-sidebar)] px-3 py-4 shadow-[var(--qy-panel-shadow)]"
+      aria-label="工作区导航"
+    >
+      <div className="mb-5 h-7" aria-hidden="true" />
       <nav className="space-y-0.5">
         {items.map(([Icon, label]) => (
-          <button key={label} type="button" className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-[var(--qy-muted)] transition-colors hover:bg-white hover:text-[var(--qy-ink)]" disabled={!['页面','数据库'].includes(label)} onClick={label === "数据库" ? () => void createDatabase() : undefined}>
-            <Icon size={15} strokeWidth={1.8} aria-hidden="true" />
+          <button
+            key={label}
+            type="button"
+            aria-current={currentNav === label ? "page" : undefined}
+            className={`flex h-10 w-full items-center gap-2 rounded-xl px-3 text-left text-[14px] font-semibold hover:bg-white hover:text-[var(--qy-ink)] ${currentNav === label ? "bg-white text-[var(--qy-ink)] shadow-sm" : "text-[var(--qy-muted)]"}`}
+            onClick={() => {
+              setSelectedNav(label);
+              onNavigate?.(label);
+            }}
+          >
+            <Icon size={16} strokeWidth={2} aria-hidden="true" />
             <span>{label}</span>
           </button>
         ))}
       </nav>
-      <PageTree />
+      <div aria-label="页面树滚动区域" className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
+        <PageTree onOpen={onOpenPage} />
+      </div>
     </aside>
   );
 }

@@ -1,6 +1,6 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Windows 开发版和发布版都使用图形子系统，避免显示额外命令行窗口。
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() {
-    tauri_app_lib::run()
+    qingyu_notes_lib::run()
 }
