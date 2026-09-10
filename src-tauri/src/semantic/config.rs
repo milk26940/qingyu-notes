@@ -9,10 +9,14 @@ pub struct EmbeddingConfig {
     pub model: String,
     pub dimension: usize,
     pub enabled: bool,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
 }
 
+fn default_concurrency() -> usize { 6 }
+
 impl Default for EmbeddingConfig {
-    fn default() -> Self { Self { base_url: "https://dashscope.aliyuncs.com/api/v1".into(), model: "qwen3-vl-embedding".into(), dimension: 1024, enabled: false } }
+    fn default() -> Self { Self { base_url: "https://dashscope.aliyuncs.com/api/v1".into(), model: "qwen3-vl-embedding".into(), dimension: 1024, enabled: false, concurrency: default_concurrency() } }
 }
 
 pub fn config_path(data_root: &Path) -> PathBuf { data_root.join("settings").join("embedding.json") }
@@ -78,4 +82,19 @@ fn windows_protect_read(path: &Path) -> Result<Vec<u8>, String> {
     let result = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
     unsafe { windows_sys::Win32::Foundation::LocalFree(output.pbData.cast()); }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EmbeddingConfig;
+
+    #[test]
+    fn legacy_config_uses_default_concurrency() {
+        let config: EmbeddingConfig = serde_json::from_str(
+            r#"{"baseUrl":"https://example.com","model":"embedding","dimension":1024,"enabled":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.concurrency, 6);
+    }
 }

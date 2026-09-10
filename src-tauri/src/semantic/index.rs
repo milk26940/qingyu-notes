@@ -1,10 +1,29 @@
 use super::{client, config, sources};
 use crate::{error::AppError, pages::repository::PageRepository};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
+static CONCURRENCY: AtomicUsize = AtomicUsize::new(6);
 static PROGRESS: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+pub fn set_concurrency(root: &Path, value: usize) -> Result<(), AppError> {
+    if !(1..=32).contains(&value) {
+        return Err(AppError::new(
+            "semantic_invalid_concurrency",
+            "并发数量请输入 1 到 32 的整数",
+        ));
+    }
+    let mut settings = config::load(root).map_err(|e| AppError::new("semantic_config", e))?;
+    settings.concurrency = value;
+    config::save(root, &settings).map_err(|e| AppError::new("semantic_config", e))?;
+    CONCURRENCY.store(value, Ordering::SeqCst);
+    Ok(())
+}
 pub fn status() -> serde_json::Value {
     PROGRESS
         .lock()
@@ -33,6 +52,7 @@ pub async fn rebuild(
     let _guard = RunningGuard;
     CANCEL.store(false, Ordering::SeqCst);
     let settings = config::load(root).map_err(|e| AppError::new("semantic_config", e))?;
+    CONCURRENCY.store(settings.concurrency.clamp(1, 32), Ordering::SeqCst);
     let key = config::load_key(root)
         .map_err(|e| AppError::new("semantic_key", e))?
         .ok_or_else(|| AppError::new("semantic_key", "请先保存 API Key"))?;
@@ -43,17 +63,8 @@ pub async fn rebuild(
     let mut reused = 0;
     let model = format!("{}|{}|extract-v2", settings.base_url, settings.model);
     let ids: Vec<_> = items.iter().map(|s| s.id.clone()).collect();
+    let mut queue = VecDeque::new();
     for item in items {
-        if let Ok(mut progress) = PROGRESS.lock() {
-            *progress = Some(
-                serde_json::json!({"total":total,"done":updated+reused+errors.len(),"title":item.title}),
-            );
-        }
-        if CANCEL.load(Ordering::SeqCst) {
-            return Ok(
-                serde_json::json!({"scanned":total,"updated":updated,"reused":reused,"removed":0,"failed":errors.len(),"errors":errors,"cancelled":true}),
-            );
-        }
         let modality = if item.image.is_some() {
             "image"
         } else {
@@ -66,21 +77,65 @@ pub async fn rebuild(
         {
             sources::save(repository, &item, &model)?;
             reused += 1;
-            continue;
+        } else {
+            queue.push_back(item);
         }
-        let input = match &item.image {
-            Some(image) => serde_json::json!([{"image":image}]),
-            None => serde_json::json!([{"text":item.text}]),
+    }
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut done = reused + errors.len();
+    if let Ok(mut progress) = PROGRESS.lock() {
+        *progress = Some(
+            serde_json::json!({"total":total,"done":done,"title":"准备并行更新","active":0,"concurrency":CONCURRENCY.load(Ordering::SeqCst)}),
+        );
+    }
+    loop {
+        while tasks.len() < CONCURRENCY.load(Ordering::SeqCst) && !CANCEL.load(Ordering::SeqCst) {
+            let Some(item) = queue.pop_front() else {
+                break;
+            };
+            let base_url = settings.base_url.clone();
+            let api_key = key.clone();
+            let model_name = settings.model.clone();
+            let dimension = settings.dimension;
+            tasks.spawn(async move {
+                let input = match &item.image {
+                    Some(image) => serde_json::json!([{"image":image}]),
+                    None => serde_json::json!([{"text":item.text}]),
+                };
+                let result =
+                    client::embed(&base_url, &api_key, &model_name, dimension, input).await;
+                (item, result)
+            });
+        }
+        if let Ok(mut progress) = PROGRESS.lock() {
+            if let Some(value) = progress.as_mut() {
+                value["active"] = serde_json::json!(tasks.len());
+                value["concurrency"] = serde_json::json!(CONCURRENCY.load(Ordering::SeqCst));
+            }
+        }
+        if CANCEL.load(Ordering::SeqCst) && tasks.is_empty() {
+            return Ok(
+                serde_json::json!({"scanned":total,"updated":updated,"reused":reused,"removed":0,"failed":errors.len(),"errors":errors,"cancelled":true}),
+            );
+        }
+        let Some(joined) = tasks.join_next().await else {
+            break;
         };
-        match client::embed(
-            &settings.base_url,
-            &key,
-            &settings.model,
-            settings.dimension,
-            input,
-        )
-        .await
-        {
+        let (item, result) = match joined {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(format!("索引任务失败：{error}"));
+                done += 1;
+                continue;
+            }
+        };
+        done += 1;
+        let modality = if item.image.is_some() {
+            "image"
+        } else {
+            "text"
+        };
+        match result {
             Ok(vector) if vector.len() == settings.dimension => {
                 if !repository
                     .open_bundle(&item.page_id)
@@ -105,6 +160,11 @@ pub async fn rebuild(
             }
             Ok(_) => errors.push(format!("{}：返回的向量维度不符", item.title)),
             Err(error) => errors.push(format!("{}：{error}", item.title)),
+        }
+        if let Ok(mut progress) = PROGRESS.lock() {
+            *progress = Some(
+                serde_json::json!({"total":total,"done":done,"title":item.title,"active":tasks.len(),"concurrency":CONCURRENCY.load(Ordering::SeqCst)}),
+            );
         }
     }
     // 解析失败时保留旧索引，避免临时不可读导致已有证据被清空。

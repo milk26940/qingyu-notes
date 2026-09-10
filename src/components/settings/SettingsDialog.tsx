@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { X } from "lucide-react";
-import { getSemanticConfig, rebuildSemanticIndex, saveSemanticConfig, testSemanticConnection } from "../../lib/tauri/semantic";
+import { getSemanticConfig, rebuildSemanticIndex, saveSemanticConfig, setSemanticConcurrency, testSemanticConnection } from "../../lib/tauri/semantic";
 import { KnowledgeSettings } from "./KnowledgeSettings";
 import { IndexProgress, SettingField, SettingNotice, inputClass, primaryClass, secondaryClass } from "./SettingsUI";
 
@@ -15,27 +15,34 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const [apiKey, setApiKey] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [hasKey, setHasKey] = useState(false);
+  const [concurrency, setConcurrency] = useState("6");
+  const [concurrencyMessage, setConcurrencyMessage] = useState("");
   const [configMessage, setConfigMessage] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [working, setWorking] = useState(false);
-  const [progress, setProgress] = useState<{total:number;done:number;title:string} | null>(null);
+  const [progress, setProgress] = useState<{total:number;done:number;title:string;active?:number;concurrency?:number} | null>(null);
   useEffect(() => {
     if (!open) return;
-    void getSemanticConfig().then((value) => { setBaseUrl(value.baseUrl); setModel(value.model); setDimension(String(value.dimension)); setEnabled(value.enabled); setHasKey(value.hasApiKey); }).catch((e) => setConfigMessage(errorText(e)));
+    void getSemanticConfig().then((value) => { setBaseUrl(value.baseUrl); setModel(value.model); setDimension(String(value.dimension)); setEnabled(value.enabled); setHasKey(value.hasApiKey); setConcurrency(String(value.concurrency ?? 6)); }).catch((e) => setConfigMessage(errorText(e)));
     const escape = (e: KeyboardEvent) => { if (e.key === "Escape") onOpenChange(false); };
     document.addEventListener("keydown", escape);
     return () => document.removeEventListener("keydown", escape);
   }, [open, onOpenChange]);
   useEffect(() => {
     if (!open || !busy) return;
-    const timer = setInterval(() => { void invoke<{embeddingProgress?:{total:number;done:number;title:string}}>("knowledge_status").then((value) => setProgress(value.embeddingProgress ?? null)).catch(() => undefined); }, 1500);
+    const timer = setInterval(() => { void invoke<{embeddingProgress?:{total:number;done:number;title:string;active?:number;concurrency?:number}}>("knowledge_status").then((value) => setProgress(value.embeddingProgress ?? null)).catch(() => undefined); }, 1500);
     return () => clearInterval(timer);
   }, [open, busy]);
   const save = async () => { setWorking(true); try { const value = await saveSemanticConfig({ baseUrl, model, dimension: Number(dimension), enabled, apiKey }); setHasKey(value.hasApiKey); setApiKey(""); setConfigMessage("语义检索模型已保存"); } catch (e) { setConfigMessage(errorText(e)); } finally { setWorking(false); } };
   const test = async () => { setWorking(true); try { const value = await testSemanticConnection({ baseUrl, model, dimension: Number(dimension), apiKey }); setConfigMessage(`连接成功，返回 ${value} 维向量`); } catch (e) { setConfigMessage(errorText(e)); } finally { setWorking(false); } };
   const rebuild = async (full = false) => { setBusy(true); setMessage(""); setProgress(null); try { const s = await rebuildSemanticIndex(full); setMessage(`${s.cancelled ? "已停止" : "更新完成"}：更新 ${s.updated}，复用 ${s.reused}，失败 ${s.failed}\n${(s.errors ?? []).join("\n")}`); } catch (e) { setMessage(errorText(e)); } finally { setBusy(false); } };
   const preview = async () => { setWorking(true); try { const d = await invoke<{total:number;pending:number;reused:number;images:number;errors:string[]}>("semantic_preview"); setMessage(`待更新 ${d.pending}，可复用 ${d.reused}，共 ${d.total} 个片段\n${d.errors.join("\n")}`); } catch(e) { setMessage(errorText(e)); } finally { setWorking(false); } };
+  const saveConcurrency = async () => {
+    const value = Number(concurrency);
+    if (!Number.isInteger(value) || value < 1 || value > 32) { setConcurrencyMessage("请输入 1–32 的整数"); return; }
+    try { await setSemanticConcurrency(value); setConcurrencyMessage("已保存，运行中的任务也会应用"); } catch (e) { setConcurrencyMessage(errorText(e)); }
+  };
   if (!open) return null;
   return <div className="fixed inset-0 z-[100] grid place-items-center bg-black/20 p-4 backdrop-blur-[3px]" onMouseDown={(e) => { if (e.target === e.currentTarget) onOpenChange(false); }}>
     <section className="flex max-h-[min(780px,90vh)] w-full max-w-[660px] flex-col overflow-hidden rounded-[24px] border border-[#e0e3e9] bg-white text-[#252b35] shadow-[0_24px_80px_#18223826]" role="dialog" aria-modal="true" aria-labelledby="knowledge-settings-title">
@@ -61,8 +68,13 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
         <div hidden={tab!=="index"}>
           <p className="mb-4 text-sm leading-6 text-[#596372]">仅手动更新，未修改的内容会自动复用。</p>
           <section className="mb-4 rounded-2xl border border-[#dfe3e9] bg-white p-5">
-            <div className="flex items-start justify-between gap-3"><div><h3 className="text-base font-semibold">语义索引</h3><p className="mt-1 text-sm text-[#596372]">文本、图片与附件的检索索引</p></div><span className="shrink-0 rounded-lg bg-[#f0f3f7] px-2.5 py-1 text-xs text-[#465366]">{busy ? "更新中" : "手动更新"}</span></div>
+            <div className="flex items-start justify-between gap-3"><div><h3 className="text-base font-semibold">语义索引</h3><p className="mt-1 text-sm text-[#596372]">文本、图片与附件的检索索引</p></div><span className="shrink-0 rounded-lg bg-[#f0f3f7] px-2.5 py-1 text-xs text-[#465366]">{busy ? `更新中 · ${progress?.active ?? 0}/${progress?.concurrency ?? (Number(concurrency) || 6)} 并发` : "手动更新"}</span></div>
             {busy && progress && <IndexProgress {...progress} />}
+            <form className="mt-4 flex flex-wrap items-center gap-3" onSubmit={(e) => { e.preventDefault(); void saveConcurrency(); }}>
+              <label className="flex items-center gap-3 text-sm font-medium">并发数量<input type="number" min="1" max="32" step="1" value={concurrency} onChange={(e) => setConcurrency(e.target.value)} className="h-9 w-20 rounded-xl border border-[#d9dde3] px-3" /></label>
+              <button className={secondaryClass} type="submit">应用</button><span className="text-xs text-[#596372]">1–32，默认 6</span>
+            </form>
+            {concurrencyMessage && <p role="status" className="mt-2 text-xs text-[#596372]">{concurrencyMessage}</p>}
             <SettingNotice text={message} />
             <div className="mt-5 flex items-center justify-between gap-3"><details className="relative"><summary className="cursor-pointer list-none text-sm font-medium text-[#596372]">更多操作 ···</summary><div className="absolute bottom-full left-0 z-10 mb-2 w-40 rounded-xl border border-[#dfe3e9] bg-white p-1 shadow-lg"><button disabled={busy || working} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-[#f0f3f7] disabled:opacity-50" onClick={(e) => { e.currentTarget.closest("details")?.removeAttribute("open"); void preview(); }}>查看待处理</button><button disabled={busy || working} className="w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-[#f0f3f7] disabled:opacity-50" onClick={(e) => { e.currentTarget.closest("details")?.removeAttribute("open"); void rebuild(true); }}>完整重建</button></div></details>{busy ? <button className={secondaryClass} onClick={() => void invoke("semantic_cancel_index").then(() => setMessage("正在停止，等待当前请求结束")).catch((e) => setMessage(errorText(e)))}>停止更新</button> : <button disabled={working || !hasKey} className={primaryClass} onClick={() => void rebuild()}>更新索引</button>}</div>
           </section>

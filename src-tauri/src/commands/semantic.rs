@@ -14,6 +14,7 @@ pub struct SemanticConfigView {
     pub model: String,
     pub dimension: usize,
     pub enabled: bool,
+    pub concurrency: usize,
     pub has_api_key: bool,
 }
 
@@ -35,6 +36,7 @@ pub async fn semantic_get_config() -> Result<SemanticConfigView, AppError> {
         model: value.model,
         dimension: value.dimension,
         enabled: value.enabled,
+        concurrency: value.concurrency,
         has_api_key,
     })
 }
@@ -42,6 +44,11 @@ pub async fn semantic_get_config() -> Result<SemanticConfigView, AppError> {
 #[tauri::command]
 pub fn knowledge_set_concurrency(value: usize) -> Result<(), AppError> {
     crate::semantic::knowledge::set_concurrency(&root()?, value)
+}
+
+#[tauri::command]
+pub fn semantic_set_concurrency(value: usize) -> Result<(), AppError> {
+    crate::semantic::index::set_concurrency(&root()?, value)
 }
 #[tauri::command]
 pub async fn knowledge_catalog(state: State<'_, PageState>) -> Result<serde_json::Value, AppError> {
@@ -68,6 +75,9 @@ pub async fn semantic_save_config(
         model: model.trim().to_string(),
         dimension,
         enabled,
+        concurrency: config::load(&root)
+            .map_err(|e| AppError::new("semantic_config_read_failed", e))?
+            .concurrency,
     };
     config::save(&root, &value).map_err(|e| AppError::new("semantic_config_write_failed", e))?;
     if let Some(key) = api_key.filter(|v| !v.trim().is_empty()) {
@@ -79,6 +89,7 @@ pub async fn semantic_save_config(
         model: value.model,
         dimension: value.dimension,
         enabled: value.enabled,
+        concurrency: value.concurrency,
         has_api_key: config::load_key(&root)
             .map_err(|e| AppError::new("semantic_key_read_failed", e))?
             .is_some(),

@@ -168,6 +168,7 @@ pub fn run() {
             commands::semantic::semantic_test_connection,
             commands::semantic::semantic_rebuild_index,
             commands::semantic::semantic_cancel_index,
+            commands::semantic::semantic_set_concurrency,
             commands::semantic::semantic_preview,
             commands::semantic::semantic_search,
             commands::semantic::knowledge_get_config,
