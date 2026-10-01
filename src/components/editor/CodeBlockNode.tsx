@@ -15,13 +15,22 @@ function CodeBlockView(props: NodeViewProps) {
   useEffect(() => {
     if (!mermaidBlock || source) return;
     let disposed = false;
-    void import("mermaid").then(async ({ default: mermaid }) => {
-      mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" });
+    setError("");
+    setSvg("");
+    void (async () => {
       try {
+        const { default: mermaid } = await import("mermaid");
+        if (disposed) return;
+        mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral", suppressErrorRendering: true });
         const result = await mermaid.render(`qy-mermaid-${crypto.randomUUID()}`, props.node.textContent);
         if (!disposed) { setSvg(result.svg); setError(""); }
-      } catch { if (!disposed) { setSvg(""); setError("Mermaid 图表无法渲染"); } }
-    });
+      } catch (cause) {
+        if (!disposed) {
+          setSvg("");
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      }
+    })();
     return () => { disposed = true; };
   }, [mermaidBlock, props.node.textContent, source]);
   useEffect(() => {
@@ -46,7 +55,7 @@ function CodeBlockView(props: NodeViewProps) {
       <span>{mermaidBlock ? "Mermaid" : props.node.attrs.language || "代码"}</span>
       {mermaidBlock && <button type="button" onClick={() => setSource((value) => !value)}>{source ? <Eye size={14}/> : <Code2 size={14}/>}<span>{source ? "预览" : "源码"}</span></button>}
     </div>
-    {source ? <div ref={codeMirrorHost} className="qy-code-mirror" contentEditable={false}/> : error ? <div className="qy-mermaid-error" contentEditable={false}>{error}</div> : <div className="qy-mermaid-preview" contentEditable={false} dangerouslySetInnerHTML={{ __html: svg }}/>}
+    {source ? <div ref={codeMirrorHost} className="qy-code-mirror" contentEditable={false}/> : error ? <div className="qy-mermaid-error" contentEditable={false} role="alert"><strong>Mermaid 图表无法渲染</strong><pre>{error}</pre></div> : <div className="qy-mermaid-preview" contentEditable={false} dangerouslySetInnerHTML={{ __html: svg }}/>}
     <NodeViewContent className="hidden"/>
   </NodeViewWrapper>;
 }

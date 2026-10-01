@@ -180,3 +180,4 @@ button:disabled { opacity: 0.46; }
 .qy-mermaid-preview { min-height: 120px; overflow: auto; padding: 18px; background: #fff; }
 .qy-mermaid-preview svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 .qy-mermaid-error { padding: 24px; color: #b42318; text-align: center; }
+.qy-mermaid-error pre { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; font-size: 13px; line-height: 1.6; }
