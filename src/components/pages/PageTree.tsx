@@ -1,7 +1,6 @@
 import { ChevronDown, ChevronRight, Database, FilePlus2, FileText, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { usePagesStore } from "../../stores/pagesStore";
-import { useWikiStore } from "../../stores/wikiStore";
 import type { PageSummary } from "../../lib/tauri/pages";
 import { useDatabaseStore } from "../../stores/databaseStore";
 import { DeleteConfirmDialog, countDescendants } from "./DeleteConfirmDialog";
@@ -79,14 +78,11 @@ function TreeNode({ page, childrenByParent, onOpen, depth = 0, onRequestDelete }
 
 export function PageTree({ onOpen }: { onOpen?: (pageId: string) => void }) {
   const pages = usePagesStore((state) => state.pages);
-  const hiddenPageIds = useWikiStore((state) => state.hiddenPageIds);
-  const refreshWiki = useWikiStore((state) => state.refresh);
-  useEffect(() => { void refreshWiki(); }, [pages, refreshWiki]);
   const create = usePagesStore((state) => state.create);
   const move = usePagesStore((state) => state.move);
   const trashPageRecursive = usePagesStore((state) => state.trashPageRecursive);
   const [deleteTarget, setDeleteTarget] = useState<PageSummary | null>(null);
-  const childrenByParent = useMemo(() => pages.filter((page) => !hiddenPageIds.includes(page.id)).reduce((map, page) => { const list = map.get(page.parentId) ?? []; list.push(page); map.set(page.parentId, list); return map; }, new Map<string | null, PageSummary[]>()), [pages, hiddenPageIds]);
+  const childrenByParent = useMemo(() => pages.reduce((map, page) => { const list = map.get(page.parentId) ?? []; list.push(page); map.set(page.parentId, list); return map; }, new Map<string | null, PageSummary[]>()), [pages]);
   return <div className="mt-2">
     <div className="mb-1 flex items-center justify-between px-2 text-[12px] font-semibold uppercase tracking-wider text-[var(--qy-faint)]"><span>我的页面</span><button type="button" className="icon-button h-6 w-6" title="新建页面" aria-label="新建页面" onClick={() => void create()}><FilePlus2 size={15} strokeWidth={2} /></button></div>
     <div aria-label="移动到根目录" className="min-h-8" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData("text/qingyu-page"); if (id) void move(id, null); }}>{(childrenByParent.get(null) ?? []).map((page) => <TreeNode key={page.id} page={page} childrenByParent={childrenByParent} onOpen={onOpen} onRequestDelete={setDeleteTarget} />)}</div>

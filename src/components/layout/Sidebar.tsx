@@ -1,14 +1,13 @@
-import { BookOpen, FileText, Search } from "lucide-react";
+import { FileText, Search } from "lucide-react";
 import { PageTree } from "../pages/PageTree";
 import { useState } from "react";
 
 const items = [
   [Search, "搜索"],
   [FileText, "页面"],
-  [BookOpen, "知识 Wiki"],
 ] as const;
 
-export type SidebarNav = "搜索" | "页面" | "知识 Wiki";
+export type SidebarNav = "搜索" | "页面";
 
 export function Sidebar({
   activeNav,

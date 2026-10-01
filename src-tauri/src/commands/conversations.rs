@@ -31,7 +31,7 @@ pub struct ConversationAttachmentData { mime: String, bytes: Vec<u8> }
 fn scope_instruction(scope: &ConversationScope) -> String {
     let focus = match scope {
         ConversationScope::Vault => {
-            "当前上下文是整个轻羽笔记库。请按需使用 knowledge.search、page.search 和 database.query。".to_owned()
+            "当前上下文是整个轻羽笔记库。请按需使用 page.search、page.read_document 和 database.query。".to_owned()
         }
         ConversationScope::Page { page_id } => format!(
             "当前上下文聚焦页面 UUID {}。需要页面正文时再调用 page.read 或 page.read_document。",
@@ -42,7 +42,7 @@ fn scope_instruction(scope: &ConversationScope) -> String {
             database_id
         ),
     };
-    format!("你运行在轻羽笔记软件中。{} 用户询问笔记中的事实、概念或关系时，即使没有点名工具，也应先调用 knowledge.search，再按需读取 Wiki 或原始页面；普通闲聊无需强制检索。回答必须区分关键词、语义、Wiki 和图谱证据，引用使用可点击格式 [页面标题](qingyu://page/<pageId>)，不得把无来源的常识写成笔记证据。所有笔记业务读取和写入只能使用轻羽提供的 page、database、relation、knowledge 动态工具；不得用 shell 或原始文件写入绕过历史、审批与索引。", focus)
+    format!("你运行在轻羽笔记软件中。{} 优先处理本轮输入的要求、选中文本、图片与附件，当前页面只提供位置，不预先提交全文。用户询问笔记内容时，主动按需使用 page.search 检索关键词，再用 page.read 或 page.read_document 核对原文；数据库问题使用 database.query。引用使用可点击格式 [页面标题](qingyu://page/<pageId>)，没有原文证据时直接说明。RAG、语义检索和知识 Wiki 已停用，不得调用 knowledge.search，历史中的相关工具及规则已经失效。所有笔记业务读写只能使用轻羽提供的 page、database、relation、attachment 动态工具；不得用 shell 或原始文件写入绕过历史与版本校验。", focus)
 }
 
 fn resumable_thread_id(
@@ -120,7 +120,7 @@ pub async fn conversation_send(
     let conversation = store.get(&id)?;
     let resumable_thread = match conversation.thread_id {
         Some(thread_id) => {
-            let resume_result = runtime.resume_thread(&thread_id).await;
+            let resume_result = runtime.resume_thread(&thread_id, Some(&scope_instruction(&conversation.scope))).await;
             resumable_thread_id(thread_id, resume_result)?
         }
         None => None,
@@ -143,16 +143,7 @@ pub async fn conversation_send(
         &attachments,
     )?;
     let attachment_context = if attachments.is_empty() { String::new() } else { format!("\n\n本轮附件（使用 attachment.read 读取非图片附件）：\n{}", attachments.iter().map(|attachment| format!("- {} | {} | {}", attachment.name, attachment.mime, attachment.relative_path)).collect::<Vec<_>>().join("\n")) };
-    let retrieval_rule = "\n\n轻羽检索规则：调用 knowledge.search 时，query 必须使用本轮用户问题原文，不得自行翻译、补充或扩展检索词。回答中的‘实际拆词’只能逐字复制工具返回的 queryTerms；关系名称和 evidence 必须逐字使用工具返回值，不得改写、拼接或声称工具未返回的验证结果。轻羽界面会单独展示权威检索依据。";
-    let knowledge_query = display_text
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| selected_text.as_deref().map(str::trim).filter(|value| !value.is_empty()))
-        .unwrap_or(&text)
-        .to_owned();
-    let evidence_rule = "\n关键词结果按页面去重，必须使用 matchedTerms 与 matches 说明该页全部命中词和片段，不能把 matchedTerm 当作全部命中。图谱关系只能引用 graph.relations 中通过校验的关系；Wiki 是 AI 整理内容，Wiki 正文中的关系或用户保留的旧关系不等同于已验证图谱证据，需读取原始笔记核对后再作为结论。";
-    let turn_id = runtime.start_turn(&thread_id, &format!("{}{}{}{}", text, attachment_context, retrieval_rule, evidence_rule), &knowledge_query, &root, &attachments, model.as_deref()).await?;
+    let turn_id = runtime.start_turn(&thread_id, &format!("{}{}", text, attachment_context), &root, &attachments, model.as_deref()).await?;
     store.set_active_turn(&id, Some(turn_id.clone()))?;
     Ok(serde_json::json!({ "threadId": thread_id, "turnId": turn_id }))
 }

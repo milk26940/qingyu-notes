@@ -28,15 +28,6 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { parseQingyuPageLink } from "../../lib/internalLinks";
 
-type KnowledgeSource = { pageId: string; title: string; link?: string };
-type KnowledgeSearchResult = {
-  queryTerms?: string[];
-  keyword?: { page?: { id?: string; title?: string }; matchedTerm?: string; matchedTerms?: string[]; link?: string }[];
-  semantic?: { pageId?: string; pageTitle?: string; link?: string }[];
-  wiki?: { pageId?: string; title?: string; link?: string; sources?: KnowledgeSource[] }[];
-  graph?: { relations?: { pageId?: string; pageTitle?: string; source?: string; target?: string; relation?: string; evidence?: string; link?: string }[] };
-};
-
 function AgentMarkdown({ text }: { text: string }) {
   const openPage = usePagesStore((state) => state.open);
   const html = useMemo(
@@ -84,20 +75,11 @@ function buildRequestText({
 function visibleMessages(
   records: ReturnType<typeof useAgentStore.getState>["records"],
 ) {
-  const knowledgeByTurn = new Map<string, KnowledgeSearchResult[]>();
-  for (const item of records) {
-    if (item.kind !== "knowledgeSearchResult") continue;
-    const turnId = String(item.data.turnId ?? "");
-    const result = item.data.result as KnowledgeSearchResult | undefined;
-    if (!turnId || !result) continue;
-    knowledgeByTurn.set(turnId, [...(knowledgeByTurn.get(turnId) ?? []), result]);
-  }
   const messages: {
     role: "user" | "assistant";
     text: string;
     itemId?: string;
     turnId?: string;
-    knowledge?: KnowledgeSearchResult[];
     selectedText?: string;
     attachments?: ConversationAttachment[];
   }[] = [];
@@ -154,54 +136,7 @@ function visibleMessages(
       messages.push({ role: "assistant", text: "本轮已停止" });
     }
   }
-  const attachedTurns = new Set<string>();
-  for (const message of messages) {
-    if (message.role !== "assistant" || !message.turnId || attachedTurns.has(message.turnId)) continue;
-    const knowledge = knowledgeByTurn.get(message.turnId);
-    if (knowledge?.length) {
-      message.knowledge = knowledge;
-      attachedTurns.add(message.turnId);
-    }
-  }
   return messages;
-}
-
-function KnowledgeEvidence({ results }: { results: KnowledgeSearchResult[] }) {
-  const openPage = usePagesStore((state) => state.open);
-  const terms = [...new Set(results.flatMap((result) => result.queryTerms ?? []))];
-  const sources = new Map<string, { title: string; labels: Set<string> }>();
-  const addSource = (pageId: string | undefined, title: string | undefined, label: string) => {
-    if (!pageId || !title) return;
-    const current = sources.get(pageId) ?? { title, labels: new Set<string>() };
-    current.labels.add(label);
-    sources.set(pageId, current);
-  };
-  for (const result of results) {
-    result.keyword?.forEach((item) => addSource(item.page?.id, item.page?.title, `关键词：${(item.matchedTerms ?? [item.matchedTerm ?? ""]).join("、")}`));
-    result.semantic?.forEach((item) => addSource(item.pageId, item.pageTitle, "语义"));
-    result.wiki?.forEach((item) => {
-      addSource(item.pageId, item.title, "Wiki");
-      item.sources?.forEach((source) => addSource(source.pageId, source.title, "原始笔记"));
-    });
-    result.graph?.relations?.forEach((item) => addSource(item.pageId, item.pageTitle, "关系证据"));
-  }
-  const relations = results.flatMap((result) => result.graph?.relations ?? []).slice(0, 8);
-  if (!terms.length && !sources.size && !relations.length) return null;
-  return <section className="mt-3 rounded-xl border border-[#d7dbe0] bg-[#f8f9fb] p-3" aria-label="知识检索依据">
-    {terms.length > 0 && <p className="text-[12px] font-semibold text-[#303640]">实际拆词：{terms.join("、")}</p>}
-    {sources.size > 0 && <div className="mt-2 flex flex-wrap gap-1.5">
-      {[...sources.entries()].map(([pageId, source]) => <button key={pageId} type="button" aria-label={`打开来源 ${source.title}`} className="rounded-lg border border-[#d7dbe0] bg-white px-2 py-1 text-left text-[11px] font-semibold text-[#1769d2] shadow-sm hover:bg-[#eef4ff]" onClick={() => void openPage(pageId, null)}>
-        {source.title}<span className="ml-1 font-normal text-[#596372]">{[...source.labels].join("/")}</span>
-      </button>)}
-    </div>}
-    {relations.length > 0 && <div className="mt-3 space-y-2 border-t border-[#d7dbe0] pt-2">
-      <p className="text-[11px] font-semibold text-[#515965]">关系原文</p>
-      {relations.map((item, index) => <div key={`${item.pageId}-${item.source}-${item.target}-${index}`} className="text-[11px] leading-5 text-[#303640]">
-        <div className="font-semibold">{item.source} · {item.relation} · {item.target}</div>
-        <div className="text-[#515965]">{item.evidence}</div>
-      </div>)}
-    </div>}
-  </section>;
 }
 
 function AssistantReply({ messages, index, sending }: {
@@ -214,7 +149,6 @@ function AssistantReply({ messages, index, sending }: {
   const previous = group.slice(0, -1);
   const process = previous.filter((item) => item.itemId);
   const legacy = previous.filter((item) => !item.itemId);
-  const knowledge = group.flatMap((item) => item.knowledge ?? []);
   return <div>
     {process.length > 0 && <details className="mb-3 rounded-xl bg-[#f3f4f6] px-3 py-2">
       <summary className="cursor-pointer text-sm font-semibold text-[#454b55]">处理过程 · {process.length} 条</summary>
@@ -225,7 +159,6 @@ function AssistantReply({ messages, index, sending }: {
       <div className="mb-2 text-xs font-semibold text-[#515965]">{sending && nextUser < 0 ? "正在回复" : "回复"}</div>
       <AgentMarkdown text={last.text} />
     </div>
-    <KnowledgeEvidence results={knowledge} />
   </div>;
 }
 

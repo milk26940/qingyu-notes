@@ -23,7 +23,6 @@ import { DocumentOutline } from "../components/pages/DocumentOutline";
 import type { PageTab } from "../components/layout/WorkspaceShell";
 import { Feather } from "lucide-react";
 import { PageSearch } from "../components/pages/PageSearch";
-import { WikiOverview } from "../components/pages/WikiOverview";
 
 function App() {
   const {
@@ -274,9 +273,7 @@ function App() {
             )}
           </div>
         )}
-        {activeNav === "知识 Wiki" ? (
-          <WikiOverview onOpen={openPage} />
-        ) : activeNav === "搜索" ? (
+        {activeNav === "搜索" ? (
           <PageSearch onOpen={openPage} />
         ) : activePage?.kind === "database" ? (
           <DatabaseTable databaseId={activePage.id} />

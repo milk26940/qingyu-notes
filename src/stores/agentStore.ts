@@ -191,7 +191,6 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         armActiveTurnTimer(event.threadId, eventTurnId);
       }
       if (event.kind === "agentMessageDelta") set((state) => ({ streamingText: state.streamingText + event.delta, records: [...state.records, record("agentMessageDelta", { delta: event.delta, turnId: event.turnId, itemId: event.itemId })] }));
-      if (event.kind === "knowledgeSearchResult") set((state) => ({ records: [...state.records, record("knowledgeSearchResult", { turnId: event.turnId, callId: event.callId, result: event.result })] }));
       if (event.kind === "turnPlanUpdated") set({ plan: event.plan });
       if (event.kind === "turnDiffUpdated") set({ diff: event.diff });
       if (event.kind === "itemStarted" || event.kind === "itemCompleted") {

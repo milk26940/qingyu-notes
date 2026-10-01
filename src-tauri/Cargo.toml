@@ -32,7 +32,6 @@ csv = "1"
 pulldown-cmark = "0.13"
 pulldown-cmark-to-cmark = "21"
 percent-encoding = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_Security_Cryptography", "Win32_System_Memory"] }

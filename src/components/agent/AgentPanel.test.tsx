@@ -236,27 +236,4 @@ describe("AgentPanel", () => {
     expect(openPage).toHaveBeenCalledWith("source-page", null);
   });
 
-  it("知识检索结果由界面展示真实拆词和可点击来源", () => {
-    mockRecords = [
-      { kind: "userMessage", data: { displayText: "设备树和 Platform 总线有什么关系" } },
-      { kind: "knowledgeSearchResult", data: {
-        turnId: "turn-1",
-        result: {
-          queryTerms: ["设备树", "Platform 总线"],
-          keyword: [{ page: { id: "source-page", title: "应用与驱动层开发" }, matchedTerm: "设备树", link: "qingyu://page/source-page" }],
-          semantic: [],
-          wiki: [{ pageId: "wiki-page", title: "概念：设备树", link: "qingyu://page/wiki-page", sources: [{ pageId: "source-page", title: "应用与驱动层开发", link: "qingyu://page/source-page" }] }],
-          graph: { relations: [{ pageId: "source-page", pageTitle: "应用与驱动层开发", source: "设备树", target: "platform_device", relation: "创建", evidence: "设备树节点创建 platform_device", link: "qingyu://page/source-page" }] },
-        },
-      } },
-      { kind: "agentMessageDelta", data: { turnId: "turn-1", itemId: "reply-1", delta: "设备树用于描述硬件。" } },
-    ];
-
-    render(<AgentPanel />);
-
-    expect(screen.getByText("实际拆词：设备树、Platform 总线")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "打开来源 应用与驱动层开发" }));
-    expect(openPage).toHaveBeenCalledWith("source-page", null);
-    expect(screen.getByText("设备树节点创建 platform_device")).toBeInTheDocument();
-  });
 });

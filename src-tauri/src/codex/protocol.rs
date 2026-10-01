@@ -77,12 +77,6 @@ pub enum CodexEvent {
         turn_id: String,
         item: CodexItemSummary,
     },
-    KnowledgeSearchResult {
-        thread_id: String,
-        turn_id: String,
-        call_id: String,
-        result: Value,
-    },
     Other {
         method: String,
         params: Value,
@@ -98,8 +92,7 @@ impl CodexEvent {
             | Self::TurnStarted { thread_id, .. }
             | Self::TurnCompleted { thread_id, .. }
             | Self::ItemStarted { thread_id, .. }
-            | Self::ItemCompleted { thread_id, .. }
-            | Self::KnowledgeSearchResult { thread_id, .. } => Some(thread_id),
+            | Self::ItemCompleted { thread_id, .. } => Some(thread_id),
             Self::Other { params, .. } => params.get("threadId").and_then(Value::as_str),
         }
     }
@@ -343,13 +336,11 @@ pub fn qingyu_dynamic_tools() -> Value {
         ("backlinks", "读取页面反向链接", id_schema("id")),
     ];
     let attachment_tools = [("read", "读取当前对话中附件的文本内容", id_schema("path"))];
-    let knowledge_tools = [("search", "只读混合检索笔记知识。自动拆分自然语言查询，并分别返回 queryTerms、keyword、semantic、wiki 和 graph.relations。wiki 是生成的知识页，sources 是原始笔记；所有 link 均为可点击的 qingyu://page/<pageId>。回答时明确区分关键词命中、语义片段、Wiki 和图谱关系，来源必须使用 Markdown 链接 [标题](qingyu://page/<pageId>)，关系结论必须附带 evidence，不足时明确说明；不会更新索引。", id_schema("query"))];
     json!([
         namespace("page", "操作轻羽结构化页面和区块", &page_tools),
         namespace("database", "操作轻羽数据库和记录", &database_tools),
         namespace("relation", "操作页面 UUID 关系", &relation_tools),
-        namespace("attachment", "只读访问用户添加到对话的附件", &attachment_tools),
-        namespace("knowledge", "按需检索笔记知识", &knowledge_tools)
+        namespace("attachment", "只读访问用户添加到对话的附件", &attachment_tools)
     ])
 }
 

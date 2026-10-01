@@ -6,7 +6,6 @@ mod error;
 mod pages;
 mod portable;
 mod projection;
-mod semantic;
 mod transfer;
 
 use tauri::{Emitter, Manager};
@@ -163,23 +162,6 @@ pub fn run() {
             commands::pages::page_search,
             commands::pages::page_links,
             commands::pages::page_backlinks,
-            commands::semantic::semantic_get_config,
-            commands::semantic::semantic_save_config,
-            commands::semantic::semantic_test_connection,
-            commands::semantic::semantic_rebuild_index,
-            commands::semantic::semantic_cancel_index,
-            commands::semantic::semantic_set_concurrency,
-            commands::semantic::semantic_preview,
-            commands::semantic::semantic_search,
-            commands::semantic::knowledge_get_config,
-            commands::semantic::knowledge_save_config,
-            commands::semantic::knowledge_rebuild,
-            commands::semantic::knowledge_cancel,
-            commands::semantic::knowledge_status,
-            commands::semantic::knowledge_set_concurrency,
-            commands::semantic::knowledge_catalog,
-            commands::semantic::knowledge_search,
-            commands::semantic::knowledge_apply_draft,
             commands::database::database_create,
             commands::database::database_get,
             commands::database::database_add_field,

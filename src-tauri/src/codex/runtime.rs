@@ -218,7 +218,6 @@ pub struct CodexRuntime {
     lifecycle: Arc<Mutex<()>>,
     generation: Arc<AtomicU64>,
     vault_root: Arc<RwLock<Option<String>>>,
-    knowledge_queries: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Default for CodexRuntime {
@@ -234,7 +233,6 @@ impl Default for CodexRuntime {
             lifecycle: Arc::new(Mutex::new(())),
             generation: Arc::new(AtomicU64::new(0)),
             vault_root: Arc::new(RwLock::new(None)),
-            knowledge_queries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -460,8 +458,12 @@ impl CodexRuntime {
             .ok_or_else(|| AppError::new("codex_invalid_thread", "Codex 未返回 threadId"))
     }
 
-    pub async fn resume_thread(&self, thread_id: &str) -> Result<(), AppError> {
-        self.request("thread/resume", json!({ "threadId": thread_id }))
+    pub async fn resume_thread(&self, thread_id: &str, instructions: Option<&str>) -> Result<(), AppError> {
+        let mut params = json!({ "threadId": thread_id });
+        if let Some(instructions) = instructions {
+            params["developerInstructions"] = json!(instructions);
+        }
+        self.request("thread/resume", params)
             .await
             .map(|_| ())
     }
@@ -470,7 +472,6 @@ impl CodexRuntime {
         &self,
         thread_id: &str,
         text: &str,
-        original_user_query: &str,
         cwd: &Path,
         attachments: &[ConversationAttachment],
         model: Option<&str>,
@@ -490,19 +491,12 @@ impl CodexRuntime {
         if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
             params["model"] = json!(model);
         }
-        self.knowledge_queries
-            .lock()
-            .await
-            .insert(thread_id.to_owned(), original_user_query.to_owned());
         let result = self
             .request(
                 "turn/start",
                 params,
             )
             .await;
-        if result.is_err() {
-            self.knowledge_queries.lock().await.remove(thread_id);
-        }
         let result = result?;
         result
             .pointer("/turn/id")
@@ -641,7 +635,6 @@ impl CodexRuntime {
                                 }
                             }
                             CodexEvent::TurnCompleted { .. } => {
-                                self.knowledge_queries.lock().await.remove(thread_id);
                                 if let Err(error) =
                                     store.set_active_turn_for_thread(thread_id, None)
                                 {
@@ -726,13 +719,6 @@ impl CodexRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let original_query = self.knowledge_queries.lock().await.get(&thread_id).cloned();
-        force_knowledge_query(
-            &namespace,
-            &tool,
-            &mut arguments,
-            original_query.as_deref(),
-        );
         if let Some(store) = self.conversations.read().await.clone() {
             if let Err(error) =
                 store.append_server_request(&thread_id, &request.method, &request.params)
@@ -806,20 +792,6 @@ impl CodexRuntime {
                 let _ = app.emit("codex://event", event);
             }
             let result = self.execute_tool(&namespace, &tool, &arguments).await;
-            if namespace == "knowledge" && tool == "search" {
-                if let Ok(value) = &result {
-                    let event = CodexEvent::KnowledgeSearchResult {
-                        thread_id: thread_id.clone(),
-                        turn_id: turn_id.clone(),
-                        call_id: call_id.clone(),
-                        result: value.clone(),
-                    };
-                    if let Some(store) = self.conversations.read().await.clone() {
-                        let _ = store.append_event(&thread_id, &event);
-                    }
-                    let _ = app.emit("codex://event", event);
-                }
-            }
             if let Some(store) = self.conversations.read().await.clone() {
                 let _ = store.append_tool_outcome(
                     &thread_id,
@@ -861,46 +833,6 @@ impl CodexRuntime {
                 .ok_or_else(|| AppError::new("tool_invalid_arguments", format!("缺少参数 {}", key)))
         };
         let value = match (namespace, tool) {
-            ("knowledge", "search") => {
-                let query=string("query")?;
-                let knowledge=crate::semantic::knowledge::search(&pages,query)?;
-                let effective_query = knowledge["effectiveQuery"].as_str().unwrap_or_default();
-                let semantic_result = if effective_query.is_empty() {
-                    Ok(Vec::new())
-                } else {
-                    crate::commands::semantic::search_repository(&pages,effective_query).await
-                };
-                match semantic_result {
-                    Ok(semantic)=>{
-                        let semantic = semantic.into_iter().map(|item| json!({
-                            "pageId":item.page_id,
-                            "blockId":item.block_id,
-                            "pageTitle":item.page_title,
-                            "snippet":item.snippet,
-                            "score":item.score,
-                            "link":format!("qingyu://page/{}#{}", item.page_id, item.block_id)
-                        })).collect::<Vec<_>>();
-                        json!({
-                        "originalQuery":knowledge["originalQuery"],
-                        "effectiveQuery":knowledge["effectiveQuery"],
-                        "queryTerms":knowledge["queryTerms"],
-                        "keyword":knowledge["keyword"],
-                        "semantic":semantic,
-                        "wiki":knowledge["wiki"],
-                        "graph":{"relations":knowledge["relations"],"matchedEntities":knowledge["matchedEntities"]}
-                    })},
-                    Err(error)=>json!({
-                        "originalQuery":knowledge["originalQuery"],
-                        "effectiveQuery":knowledge["effectiveQuery"],
-                        "queryTerms":knowledge["queryTerms"],
-                        "keyword":knowledge["keyword"],
-                        "semantic":[],
-                        "wiki":knowledge["wiki"],
-                        "graph":{"relations":knowledge["relations"],"matchedEntities":knowledge["matchedEntities"]},
-                        "semanticUnavailable":error.message
-                    }),
-                }
-            }
             ("page", "search") => serde_json::to_value(pages.search(string("query")?)?).unwrap(),
             ("page", "read") => serde_json::to_value(pages.get(string("id")?, false)?).unwrap(),
             ("page", "read_document") => serde_json::to_value(pages.open_bundle(string("id")?)?.document).unwrap(),
@@ -1270,7 +1202,7 @@ impl CodexRuntime {
         };
         if let Ok(ids) = store.registered_thread_ids() {
             for id in ids {
-                let _ = self.resume_thread(&id).await;
+                let _ = self.resume_thread(&id, None).await;
             }
         }
     }
@@ -1387,19 +1319,6 @@ fn dynamic_tools_unavailable(error: &AppError) -> bool {
         || message.contains("experimental")
         || message.contains("unsupported")
         || message.contains("unknown field")
-}
-
-fn force_knowledge_query(
-    namespace: &str,
-    tool: &str,
-    arguments: &mut Value,
-    original_query: Option<&str>,
-) {
-    if namespace == "knowledge" && tool == "search" {
-        if let Some(query) = original_query {
-            arguments["query"] = json!(query);
-        }
-    }
 }
 
 fn approval_matches(approval: &PendingApproval, generation: u64, vault_root: &str) -> bool {
@@ -1600,20 +1519,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("只能回答只读问题"));
-    }
-
-    #[test]
-    fn knowledge_search_uses_the_original_user_question() {
-        let mut arguments = json!({ "query": "device tree Platform bus" });
-
-        force_knowledge_query(
-            "knowledge",
-            "search",
-            &mut arguments,
-            Some("设备树和 Platform 总线是什么关系？"),
-        );
-
-        assert_eq!(arguments["query"], "设备树和 Platform 总线是什么关系？");
     }
 
     #[test]

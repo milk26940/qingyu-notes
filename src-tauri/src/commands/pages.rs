@@ -33,7 +33,6 @@ pub async fn vault_init(
 ) -> Result<String, AppError> {
     let root = PageRepository::default_root();
     let repo = PageRepository::open(root.clone())?;
-    crate::semantic::knowledge::repair_empty_wiki(&repo)?;
     let projection = SearchProjection::open(&root)?;
     projection.rebuild(&repo)?;
     let event_app = app.clone();

@@ -1,11 +1,10 @@
-import { Archive, Check, Feather, PanelLeft, PanelRight, Save, Settings, Trash2, X } from "lucide-react";
+import { Archive, Check, Feather, PanelLeft, PanelRight, Save, Trash2, X } from "lucide-react";
 import type { PageTab } from "./WorkspaceShell";
 import { useEffect, useRef, useState } from "react";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { BackupDialog } from "../backup/BackupDialog";
 import { usePagesStore } from "../../stores/pagesStore";
 import { DeleteConfirmDialog, countDescendants } from "../pages/DeleteConfirmDialog";
-import { SettingsDialog } from "../settings/SettingsDialog";
 
 export function Topbar({
   tabs = [],
@@ -27,7 +26,6 @@ export function Topbar({
   const pages = usePagesStore((state) => state.pages);
   const trashPageRecursive = usePagesStore((state) => state.trashPageRecursive);
   const [backupOpen, setBackupOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [tabMenu, setTabMenu] = useState<{
     pageId: string;
@@ -164,14 +162,6 @@ export function Topbar({
       <div className="flex min-w-0 shrink-0 items-center justify-end gap-1 border-l border-[var(--qy-border)] pl-2">
         <button
           className="icon-button"
-          title="语义检索设置"
-          aria-label="语义检索设置"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings size={16} />
-        </button>
-        <button
-          className="icon-button"
           title="切换侧栏"
           aria-label="切换侧栏"
           onClick={toggleSidebar}
@@ -222,7 +212,6 @@ export function Topbar({
         </button>
       </div>
       <BackupDialog open={backupOpen} onOpenChange={setBackupOpen} />
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       {activePage && (
         <DeleteConfirmDialog
           open={deleteConfirmOpen}

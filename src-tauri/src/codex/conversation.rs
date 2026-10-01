@@ -293,10 +293,6 @@ impl ConversationStore {
             CodexEvent::ItemCompleted { turn_id, item, .. } => {
                 Some(("itemCompleted", json!({ "turnId": turn_id, "item": item })))
             }
-            CodexEvent::KnowledgeSearchResult { turn_id, call_id, result, .. } => Some((
-                "knowledgeSearchResult",
-                json!({ "turnId": turn_id, "callId": call_id, "result": result }),
-            )),
             CodexEvent::Other { .. } => None,
         };
         if let Some((kind, data)) = record {

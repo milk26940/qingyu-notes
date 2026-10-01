@@ -12,7 +12,6 @@ export type CodexStreamEvent =
   | { kind: "turnDiffUpdated"; threadId: string; turnId: string; diff: string }
   | { kind: "turnStarted" | "turnCompleted"; threadId: string; turn: Record<string, unknown> }
   | { kind: "itemStarted" | "itemCompleted"; threadId: string; turnId: string; item: CodexItemSummary }
-  | { kind: "knowledgeSearchResult"; threadId: string; turnId: string; callId: string; result: Record<string, unknown> }
   | { kind: "other"; method: string; params: unknown };
 export type PendingApproval = { id: string; requestId: unknown; threadId: string; turnId: string; namespace: string; tool: string; arguments: unknown; diff: string };
 export type ConversationPersistenceError = { code: string; message: string };

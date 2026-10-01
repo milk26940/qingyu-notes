@@ -3,5 +3,4 @@ pub mod codex;
 pub mod conversations;
 pub mod database;
 pub mod pages;
-pub mod semantic;
 pub mod transfer;

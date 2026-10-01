@@ -18,7 +18,6 @@ use super::model::{
 use crate::error::AppError;
 use crate::database::model::DatabaseDefinition;
 use crate::portable::PortablePaths;
-use crate::semantic::repository as semantic_repository;
 
 #[derive(Clone)]
 pub struct PageRepository {
@@ -33,13 +32,13 @@ static VAULT_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLoc
 const SCHEMA_VERSION: i64 = 2;
 
 fn open_connection(path: &Path) -> Result<Connection, AppError> {
-    let connection = Connection::open(path)
+    let mut connection = Connection::open(path)
         .map_err(|error| AppError::new("sqlite_open_failed", error.to_string()))?;
     connection
         .execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL;")
         .map_err(|error| AppError::new("sqlite_init_failed", error.to_string()))?;
     initialize_schema(&connection)?;
-    semantic_repository::initialize(&connection).map_err(|e| AppError::new("semantic_schema_failed", e))?;
+    super::retired_knowledge::remove(&mut connection, path)?;
     Ok(connection)
 }
 
@@ -630,63 +629,6 @@ impl PageRepository {
         &self.database_path
     }
 
-    pub fn embedding_blocks(&self, page_id: Option<&str>) -> Result<Vec<(String, String, String)>, AppError> {
-        let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
-        let sql = if page_id.is_some() {
-            "SELECT b.id,b.page_id,b.text FROM blocks b JOIN pages p ON p.id=b.page_id WHERE p.trashed_at IS NULL AND b.page_id=?1 AND trim(b.text)<>'' ORDER BY b.position"
-        } else {
-            "SELECT b.id,b.page_id,b.text FROM blocks b JOIN pages p ON p.id=b.page_id WHERE p.trashed_at IS NULL AND trim(b.text)<>'' ORDER BY b.page_id,b.position"
-        };
-        let mut statement = connection.prepare(sql).map_err(sqlite_read_error)?;
-        if let Some(id) = page_id {
-            statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(sqlite_read_error)?.collect::<Result<Vec<_>, _>>().map_err(sqlite_read_error)
-        } else {
-            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(sqlite_read_error)?.collect::<Result<Vec<_>, _>>().map_err(sqlite_read_error)
-        }
-    }
-
-    pub fn embedding_titles(&self) -> Result<Vec<(String, String, String)>, AppError> { let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?; let mut statement = connection.prepare("SELECT id,title FROM pages WHERE trashed_at IS NULL AND trim(title)<>'' ORDER BY id").map_err(sqlite_read_error)?; let rows = statement.query_map([], |row| Ok((format!("page:{}", row.get::<_, String>(0)?), row.get(0)?, row.get(1)?))).map_err(sqlite_read_error)?; rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_read_error) }
-
-    pub fn embedding_attachments(&self) -> Result<Vec<(String, String, String, String, i64)>, AppError> {
-        let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
-        let mut statement = connection.prepare("SELECT a.id,a.page_id,a.relative_path,a.mime,a.size FROM attachments a JOIN pages p ON p.id=a.page_id WHERE p.trashed_at IS NULL ORDER BY a.page_id,a.relative_path").map_err(sqlite_read_error)?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))).map_err(sqlite_read_error)?; rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_read_error)
-    }
-
-    pub fn embedding_record(&self, item_id: &str, model_id: &str, dimension: usize, modality: &str) -> Result<Option<(String, String)>, AppError> {
-        let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
-        connection.query_row("SELECT content_hash,block_id FROM block_embeddings WHERE block_id=?1 AND model_id=?2 AND dimension=?3 AND modality=?4", rusqlite::params![item_id, model_id, dimension as i64, modality], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(sqlite_read_error)
-    }
-
-    pub fn delete_embedding_except(&self, item_ids: &[String]) -> Result<usize, AppError> {
-        let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
-        if item_ids.is_empty() { return Ok(connection.execute("DELETE FROM block_embeddings", []).map_err(sqlite_write_error)?); }
-        let keep: std::collections::HashSet<&String> = item_ids.iter().collect();
-        let mut statement = connection.prepare("SELECT block_id FROM block_embeddings").map_err(sqlite_read_error)?;
-        let ids = statement.query_map([], |row| row.get::<_,String>(0)).map_err(sqlite_read_error)?.collect::<Result<Vec<_>,_>>().map_err(sqlite_read_error)?;
-        let mut removed = 0;
-        for id in ids { if !keep.contains(&id) { removed += connection.execute("DELETE FROM block_embeddings WHERE block_id=?1", [&id]).map_err(sqlite_write_error)?; } }
-        Ok(removed)
-    }
-
-    pub fn save_embedding(&self, block_id: &str, page_id: &str, content_hash: &str, modality: &str, model_id: &str, vector: &[f32]) -> Result<(), AppError> {
-        let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
-        let bytes = vector.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>();
-        connection.execute("INSERT INTO block_embeddings(block_id,page_id,content_hash,modality,model_id,dimension,vector,updated_at) VALUES(?1,?2,?3,?8,?4,?5,?6,?7) ON CONFLICT(block_id) DO UPDATE SET page_id=excluded.page_id,content_hash=excluded.content_hash,modality=excluded.modality,model_id=excluded.model_id,dimension=excluded.dimension,vector=excluded.vector,updated_at=excluded.updated_at", params![block_id,page_id,content_hash,model_id,vector.len() as i64,bytes,now(),modality]).map_err(sqlite_write_error)?;
-        Ok(())
-    }
-
-    pub fn embedding_vectors(&self, dimension: usize) -> Result<Vec<(String, String, Vec<f32>)>, AppError> {
-        let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
-        let mut statement = connection.prepare("SELECT block_id,page_id,vector FROM block_embeddings WHERE dimension=?1").map_err(sqlite_read_error)?;
-        let rows = statement.query_map([dimension as i64], |row| {
-            let bytes: Vec<u8> = row.get(2)?;
-            let vector = bytes.chunks_exact(4).map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])).collect();
-            Ok((row.get(0)?, row.get(1)?, vector))
-        }).map_err(sqlite_read_error)?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(sqlite_read_error)
-    }
-
     pub(crate) fn with_transaction<T>(
         &self,
         operation: impl FnOnce(&Transaction<'_>) -> Result<T, AppError>,
@@ -768,7 +710,8 @@ impl PageRepository {
         rusqlite::backup::Backup::new(&source, &mut target)
             .and_then(|backup| backup.run_to_completion(64, Duration::from_millis(5), None))
             .map_err(|error| AppError::new("sqlite_restore_failed", error.to_string()))?;
-        initialize_schema(&target)
+        initialize_schema(&target)?;
+        super::retired_knowledge::remove(&mut target, &self.database_path)
     }
 
     pub fn list(&self, include_trash: bool) -> Result<Vec<PageSummary>, AppError> {
