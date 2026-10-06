@@ -38,8 +38,10 @@ export function Topbar({
     const close = (event: PointerEvent) => {
       if (!tabMenuRef.current?.contains(event.target as Node)) setTabMenu(null);
     };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setTabMenu(null); };
+    document.addEventListener("keydown", escape);
     document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
+    return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", escape); };
   }, [tabMenu]);
   const menuIndex = tabMenu
     ? tabs.findIndex((tab) => tab.pageId === tabMenu.pageId)
@@ -104,7 +106,7 @@ export function Topbar({
         <div
           ref={tabMenuRef}
           className="fixed z-50 min-w-40 rounded-2xl border border-[var(--qy-border)] bg-white p-1.5 text-[12px] shadow-[var(--qy-float-shadow)]"
-          style={{ left: tabMenu.x, top: tabMenu.y }}
+          style={{ left: Math.max(8, Math.min(tabMenu.x, window.innerWidth - 210)), top: Math.max(8, Math.min(tabMenu.y, window.innerHeight - 180)) }}
         >
           <button
             type="button"

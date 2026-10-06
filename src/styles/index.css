@@ -2,7 +2,7 @@
 
 @font-face {
   font-family: "Qingyu Source Han Sans";
-  src: url("../assets/fonts/SourceHanSansCN-Regular.otf") format("opentype");
+  src: url("../assets/fonts/SourceHanSansCN-Regular.woff2") format("woff2");
   font-style: normal;
   font-weight: 400;
   font-display: swap;
@@ -10,7 +10,7 @@
 
 @font-face {
   font-family: "Qingyu Source Han Sans";
-  src: url("../assets/fonts/SourceHanSansCN-Medium.otf") format("opentype");
+  src: url("../assets/fonts/SourceHanSansCN-Medium.woff2") format("woff2");
   font-style: normal;
   font-weight: 500;
   font-display: swap;
@@ -18,7 +18,7 @@
 
 @font-face {
   font-family: "Qingyu Source Han Sans";
-  src: url("../assets/fonts/SourceHanSansCN-Bold.otf") format("opentype");
+  src: url("../assets/fonts/SourceHanSansCN-Bold.woff2") format("woff2");
   font-style: normal;
   font-weight: 700 900;
   font-display: swap;
@@ -181,3 +181,30 @@ button:disabled { opacity: 0.46; }
 .qy-mermaid-preview svg { display: block; max-width: 100%; height: auto; margin: 0 auto; }
 .qy-mermaid-error { padding: 24px; color: #b42318; text-align: center; }
 .qy-mermaid-error pre { margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; font-size: 13px; line-height: 1.6; }
+
+/* 布局、交互与无障碍统一规则。 */
+:root { --qy-radius-control: 10px; --qy-radius-panel: 20px; --qy-motion-fast: 160ms; }
+.qy-workspace { height: 100dvh; }
+.qy-panel-scrim { position: absolute; inset: 0; z-index: 90; background: rgb(25 27 31 / 12%); }
+.qy-agent-drawer, .qy-sidebar-drawer { position: absolute; inset-block: 0; display: flex; min-height: 0; padding: 4px; }
+.qy-agent-drawer { right: 0; }
+.qy-sidebar-drawer { left: 0; }
+.qy-agent-drawer > *, .qy-sidebar-drawer > * { width: 100%; height: 100%; min-width: 0; }
+.qy-status-bar { min-width: 0; overflow: hidden; white-space: nowrap; }
+.qy-panel-resizer:hover::before, .qy-panel-resizer:focus-visible::before, .qy-panel-resizer[data-dragging]::before { content: ""; display: block; width: 3px; height: 44px; border-radius: 4px; background: var(--qy-accent); }
+button:focus-visible, [role="button"]:focus-visible, summary:focus-visible, [role="separator"]:focus-visible { outline: 2px solid var(--qy-accent); outline-offset: 2px; }
+.qy-block-menu, .qy-page-link-menu { z-index: 160; }
+.qy-agent-markdown { overflow-wrap: anywhere; }
+.qy-agent-markdown pre, .qy-agent-markdown table { overflow-wrap: normal; }
+.qy-page-loading { position: absolute; inset: 0; z-index: 35; display: grid; place-content: center; gap: 12px; background: rgb(255 255 255 / 92%); pointer-events: auto; }
+.qy-page-loading > span { width: min(360px, 55vw); height: 14px; background: var(--qy-selected); border-radius: 8px; animation: qy-loading 1s ease-in-out infinite alternate; }
+.qy-page-loading > span:first-child { width: min(180px, 40vw); height: 24px; margin-bottom: 8px; }
+@keyframes qy-loading { to { opacity: .45; } }
+@media (max-width: 1180px) { .qy-status-bar { gap: 10px; font-size: 12px; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  button:not(:disabled):active, [role="button"]:active, summary:active { transform: none; }
+}
+
+.qy-agent-slot { min-width: 0; min-height: 0; }
+.qy-agent-slot > * { width: 100%; height: 100%; }

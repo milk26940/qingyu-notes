@@ -83,6 +83,6 @@ describe("应用入口", () => {
 
     await waitFor(() => expect(connect).toHaveBeenCalledOnce());
     expect(subscribe).toHaveBeenCalledOnce();
-    expect(screen.queryByLabelText("Agent 面板")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Agent 面板")).not.toBeVisible();
   });
 });

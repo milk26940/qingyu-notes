@@ -13,7 +13,8 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ConversationScope } from "../../lib/tauri/conversations";
 import type { ConversationAttachment } from "../../lib/tauri/conversations";
 import { readConversationAttachment } from "../../lib/tauri/conversations";
@@ -28,7 +29,7 @@ import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { parseQingyuPageLink } from "../../lib/internalLinks";
 
-function AgentMarkdown({ text }: { text: string }) {
+const AgentMarkdown = memo(function AgentMarkdown({ text }: { text: string }) {
   const openPage = usePagesStore((state) => state.open);
   const html = useMemo(
     () => DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }) as string, {
@@ -44,7 +45,7 @@ function AgentMarkdown({ text }: { text: string }) {
     event.preventDefault();
     void openPage(target.pageId, target.blockId);
   }} dangerouslySetInnerHTML={{ __html: html }} />;
-}
+});
 
 function buildRequestText({
   prompt,
@@ -139,7 +140,7 @@ function visibleMessages(
   return messages;
 }
 
-function AssistantReply({ messages, index, sending }: {
+const AssistantReply = memo(function AssistantReply({ messages, index, sending }: {
   messages: ReturnType<typeof visibleMessages>; index: number; sending: boolean;
 }) {
   const nextUser = messages.findIndex((item, position) => position > index && item.role === "user");
@@ -149,18 +150,18 @@ function AssistantReply({ messages, index, sending }: {
   const previous = group.slice(0, -1);
   const process = previous.filter((item) => item.itemId);
   const legacy = previous.filter((item) => !item.itemId);
-  return <div>
+  return <div className="qy-agent-reply">
     {process.length > 0 && <details className="mb-3 rounded-xl bg-[#f3f4f6] px-3 py-2">
       <summary className="cursor-pointer text-sm font-semibold text-[#454b55]">处理过程 · {process.length} 条</summary>
       <div className="mt-2 space-y-3">{process.map((item, position) => <div key={item.itemId ?? position} className="border-t border-[#d5d8dd] pt-2"><AgentMarkdown text={item.text} /></div>)}</div>
     </details>}
     {legacy.map((item, position) => <AgentMarkdown key={position} text={item.text} />)}
-    <div className="border-t border-[#d5d8dd] pt-3">
+    <div className="qy-agent-answer rounded-xl border border-[var(--qy-border)] bg-white px-3 py-3">
       <div className="mb-2 text-xs font-semibold text-[#515965]">{sending && nextUser < 0 ? "正在回复" : "回复"}</div>
       <AgentMarkdown text={last.text} />
     </div>
   </div>;
-}
+});
 
 function scopeLabel(scope: ConversationScope) {
   if (scope.kind === "page") return "当前页面";
@@ -238,7 +239,7 @@ function AttachmentPreview({
   );
 }
 
-export function AgentPanel({
+export const AgentPanel = memo(function AgentPanel({
   selectedText = "",
   onClearSelection,
 }: {
@@ -252,7 +253,7 @@ export function AgentPanel({
   const modelsError = useCodexStore((state) => state.modelsError) ?? null;
   const loadModels = useCodexStore((state) => state.loadModels);
   const toggleAgentPanel = useWorkspaceStore((state) => state.toggleAgentPanel);
-  const activePage = usePagesStore((state) => state.activePage);
+  const activePage = usePagesStore(useShallow((state) => state.activePage ? { id: state.activePage.id, title: state.activePage.title, kind: state.activePage.kind } : null));
   const reloadPage = usePagesStore((state) => state.reload);
   const storeSelectedModel = useAgentStore((state) => state?.selectedModel);
   const selectedModel = typeof storeSelectedModel === "string" ? storeSelectedModel : null;
@@ -290,11 +291,11 @@ export function AgentPanel({
     localStorage.setItem("qingyu-agent-mode", "auto");
   }, []);
   useEffect(() => {
-    if (previousSending.current && !sending && activePage) {
+    if (previousSending.current && !sending && activePage && reloadPage) {
       void reloadPage(activePage.id);
     }
     previousSending.current = sending;
-  }, [activePage, reloadPage, sending]);
+  }, [activePage?.id, reloadPage, sending]);
   useEffect(() => {
     approvals.forEach((approval) => {
         void resolveApproval(approval.id, true);
@@ -306,7 +307,19 @@ export function AgentPanel({
       activePage ? { kind: "page", pageId: activePage.id } : { kind: "vault" },
     [activePage],
   );
-  const messages = visibleMessages(records);
+  const messages = useMemo(() => visibleMessages(records), [records]);
+  const [visibleCount, setVisibleCount] = useState(40);
+  const firstMessage = Math.max(0, messages.length - visibleCount);
+  let firstVisible = firstMessage;
+  while (firstVisible > 0 && messages[firstVisible]?.role === "assistant") firstVisible--;
+  const messageViewport = useRef<HTMLDivElement>(null);
+  const followReply = useRef(true);
+  useEffect(() => { setVisibleCount(40); followReply.current = true; }, [activeId]);
+  useEffect(() => {
+    if (!followReply.current || !messageViewport.current) return;
+    const frame = requestAnimationFrame(() => { const element = messageViewport.current; if (element) element.scrollTop = element.scrollHeight; });
+    return () => cancelAnimationFrame(frame);
+  }, [messages, sending]);
   const sortedConversations = useMemo(
     () =>
       [...conversations].sort(
@@ -523,7 +536,7 @@ export function AgentPanel({
           </div>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      <div ref={messageViewport} className="min-h-0 flex-1 overflow-y-auto px-3 py-3" onScroll={(event) => { const element = event.currentTarget; followReply.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64; }}>
         {!ready && (
           <div className="flex h-full flex-col items-center justify-center text-center text-[13px] text-[var(--qy-muted)]">
             {status.state === "starting" ? (
@@ -562,8 +575,9 @@ export function AgentPanel({
           </div>
         )}
         {ready && (
-          <div className="space-y-3">
-            {messages.map((message, index) => message.role === "assistant" && messages[index - 1]?.role === "assistant" ? null : (
+          <div className="space-y-3" role="log" aria-label="对话消息">
+            {firstVisible > 0 && <button type="button" className="w-full rounded-xl py-2 text-sm text-[var(--qy-muted)] hover:bg-white" onClick={() => { followReply.current = false; setVisibleCount((count) => count + 40); }}>加载更早的消息</button>}
+            {messages.map((message, index) => index < firstVisible ? null : message.role === "assistant" && messages[index - 1]?.role === "assistant" ? null : (
               <div
                 key={`${message.role}-${index}`}
                 className={
@@ -953,4 +967,4 @@ export function AgentPanel({
       </div>
     </aside>
   );
-}
+});

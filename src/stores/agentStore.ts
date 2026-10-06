@@ -183,6 +183,25 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const approvals = await api.listApprovals();
     set({ conversations, approvals });
     if (!get().activeId && conversations[0]) await get().open(conversations[0].id);
+    let deltaTimer: ReturnType<typeof setTimeout> | null = null;
+    let pending: Extract<CodexStreamEvent, { kind: "agentMessageDelta" }>[] = [];
+    const flushDeltas = () => {
+      if (deltaTimer !== null) clearTimeout(deltaTimer);
+      deltaTimer = null;
+      const deltas = pending; pending = [];
+      const active = get().conversations.find((item) => item.id === get().activeId);
+      const accepted = deltas.filter((event) => event.threadId === active?.threadId);
+      if (!accepted.length) return;
+      set((state) => {
+        const records = [...state.records];
+        for (const event of accepted) {
+          const last = records[records.length - 1];
+          if (last?.kind === "agentMessageDelta" && last.data.itemId === event.itemId && last.data.turnId === event.turnId) records[records.length - 1] = { ...last, data: { ...last.data, delta: String(last.data.delta ?? "") + event.delta } };
+          else records.push(record("agentMessageDelta", { delta: event.delta, turnId: event.turnId, itemId: event.itemId }));
+        }
+        return { records, streamingText: state.streamingText + accepted.map((event) => event.delta).join("") };
+      });
+    };
     const handle = (event: CodexStreamEvent) => {
       const active = get().conversations.find((item) => item.id === get().activeId);
       if ("threadId" in event && active?.threadId !== event.threadId) return;
@@ -190,7 +209,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       if ("threadId" in event && eventTurnId && get().sending) {
         armActiveTurnTimer(event.threadId, eventTurnId);
       }
-      if (event.kind === "agentMessageDelta") set((state) => ({ streamingText: state.streamingText + event.delta, records: [...state.records, record("agentMessageDelta", { delta: event.delta, turnId: event.turnId, itemId: event.itemId })] }));
+      if (event.kind === "agentMessageDelta") {
+        pending.push(event);
+        if (deltaTimer === null) deltaTimer = setTimeout(flushDeltas, 40);
+        return;
+      }
+      flushDeltas();
       if (event.kind === "turnPlanUpdated") set({ plan: event.plan });
       if (event.kind === "turnDiffUpdated") set({ diff: event.diff });
       if (event.kind === "itemStarted" || event.kind === "itemCompleted") {
@@ -224,7 +248,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       set((state) => ({ approvals: [...state.approvals.filter((item) => item.id !== approval.id), approval] }));
     });
     const unlistenPersistenceErrors = await api.subscribePersistenceErrors((failure) => set({ error: `对话历史写入失败：${failure.message}` }));
-    return () => { unlistenEvents(); unlistenApprovals(); unlistenPersistenceErrors(); };
+    return () => { flushDeltas(); unlistenEvents(); unlistenApprovals(); unlistenPersistenceErrors(); };
   },
   setSelectedModel: (model) => {
     const activeId = get().activeId;

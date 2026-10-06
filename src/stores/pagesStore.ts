@@ -49,7 +49,38 @@ const failure = (error: unknown) => (typeof error === "object" && error && "mess
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 let saveInFlight: Promise<void> | null = null;
 let openSequence = 0;
-const pageBundleCache = new Map<string, Awaited<ReturnType<typeof api.openPageBundle>>>();
+type PageBundle = Awaited<ReturnType<typeof api.openPageBundle>>;
+const pageBundleCache = new Map<string, { bundle: PageBundle; timestamp: number }>();
+const pendingBundles = new Map<string, Promise<PageBundle>>();
+const CACHE_LIMIT = 24;
+const CACHE_TTL = 30_000;
+let cacheGeneration = 0;
+let searchSequence = 0;
+
+const invalidateBundles = () => { cacheGeneration++; pageBundleCache.clear(); pendingBundles.clear(); };
+const cacheBundle = (id: string, bundle: PageBundle) => {
+  pageBundleCache.delete(id);
+  pageBundleCache.set(id, { bundle, timestamp: Date.now() });
+  if (pageBundleCache.size > CACHE_LIMIT) pageBundleCache.delete(pageBundleCache.keys().next().value!);
+};
+const cachedBundle = (id: string) => {
+  const cached = pageBundleCache.get(id);
+  if (!cached || Date.now() - cached.timestamp > CACHE_TTL) { pageBundleCache.delete(id); return null; }
+  pageBundleCache.delete(id);
+  pageBundleCache.set(id, cached);
+  return cached.bundle;
+};
+const fetchBundle = (id: string) => {
+  const pending = pendingBundles.get(id);
+  if (pending) return pending;
+  const generation = cacheGeneration;
+  const request = api.openPageBundle(id).then((bundle) => {
+    if (generation === cacheGeneration) cacheBundle(id, bundle);
+    return bundle;
+  }).finally(() => { if (pendingBundles.get(id) === request) pendingBundles.delete(id); });
+  pendingBundles.set(id, request);
+  return request;
+};
 
 const cancelAutoSave = () => {
   if (autoSaveTimer != null) clearTimeout(autoSaveTimer);
@@ -82,16 +113,19 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     try {
       set({ projectionStatus: { state: "initializing" } });
       const vaultPath = await api.initVault(path);
+      invalidateBundles();
+      openSequence++;
+      searchSequence++;
       set({ vaultPath, pages: [], trash: [], activePage: null, activeDocument: null, persistedPage: null, targetBlockId: null, links: [], backlinks: [], history: [], searchResults: [], searchQuery: "", saveState: "idle", error: null, projectionStatus: { state: "ready" } });
       await get().refresh();
     } catch (error) {
       set({ error: failure(error) });
     }
   },
-  refresh: async () => { try { const [pages, trash] = await Promise.all([api.listPages(), api.listPages(true)]); set({ pages: pages.filter((page) => !page.trashedAt), trash: trash.filter((page) => page.trashedAt), error: null }); } catch (error) { set({ error: failure(error) }); } },
+  refresh: async () => { invalidateBundles(); try { const [pages, trash] = await Promise.all([api.listPages(), api.listPages(true)]); set({ pages: pages.filter((page) => !page.trashedAt), trash: trash.filter((page) => page.trashedAt), error: null }); } catch (error) { set({ error: failure(error) }); } },
   prefetch: (id) => {
-    if (pageBundleCache.has(id) || get().activePage?.id === id) return;
-    void api.openPageBundle(id).then((bundle) => pageBundleCache.set(id, bundle)).catch(() => undefined);
+    if (cachedBundle(id) || get().activePage?.id === id) return;
+    void fetchBundle(id).catch(() => undefined);
   },
   open: async (id, targetBlockId = null) => {
     const sequence = ++openSequence;
@@ -100,14 +134,18 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     if (!(await flushPendingSave(get))) { if (sequence === openSequence) set({ openingPageId: null }); return; }
     if (sequence !== openSequence) return;
     try {
-      const cached = pageBundleCache.get(id);
+      const cached = cachedBundle(id);
       if (cached) {
         set({ activePage: cached.page, activeDocument: cached.document, persistedPage: cached.page, targetBlockId, links: cached.links, backlinks: cached.backlinks, history: [], saveState: "idle", error: null });
-        pageBundleCache.delete(id);
-        void api.openPageBundle(id).then((bundle) => pageBundleCache.set(id, bundle)).catch(() => undefined);
+        const localDocument = get().activeDocument;
+        const generation = cacheGeneration;
+        void fetchBundle(id).then((bundle) => {
+          if (sequence !== openSequence || generation !== cacheGeneration || get().activeDocument !== localDocument || ["dirty", "saving", "conflict"].includes(get().saveState)) return;
+          if (bundle.document.revision !== cached.document.revision) set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, links: bundle.links, backlinks: bundle.backlinks });
+        }).catch(() => undefined);
         return;
       }
-      const bundle = await api.openPageBundle(id);
+      const bundle = await fetchBundle(id);
       if (sequence !== openSequence) return;
       set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, targetBlockId, links: bundle.links, backlinks: bundle.backlinks, history: [], saveState: "idle", error: null });
     } catch (error) { if (sequence === openSequence) set({ error: failure(error) }); }
@@ -115,9 +153,11 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
   },
   reload: async (id) => {
     if (get().saveState === "dirty" || get().saveState === "saving" || get().saveState === "conflict") return;
+    const localDocument = get().activeDocument;
     try {
-      const bundle = await api.openPageBundle(id);
-      if (get().activePage?.id !== id) return;
+      invalidateBundles();
+      const bundle = await fetchBundle(id);
+      if (get().activePage?.id !== id || get().activeDocument !== localDocument || ["dirty", "saving", "conflict"].includes(get().saveState)) return;
       set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, targetBlockId: null, links: bundle.links, backlinks: bundle.backlinks, saveState: "saved", error: null });
       pageBundleCache.delete(id);
       await get().refresh();
@@ -164,6 +204,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       try {
         if (document && document.pageId === page.id) {
           const savedDocument = await api.savePageDocument(document, document.revision);
+          invalidateBundles();
           const current = get().activeDocument;
           if (current?.pageId === document.pageId && current === document) {
             set({ activeDocument: savedDocument, persistedPage: { ...page, content: savedDocument.blocks.map((block) => block.text).filter(Boolean).join("\n") }, saveState: "saved", error: null });
@@ -171,18 +212,19 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
             set({ activeDocument: { ...current, revision: savedDocument.revision }, saveState: "dirty", error: null });
             scheduleAutoSave(get().save);
           }
-          await get().refresh();
+          set((state) => ({ pages: state.pages.map((entry) => entry.id === page.id && entry.title !== savedDocument.title ? { ...entry, title: savedDocument.title } : entry) }));
           return;
         }
         const persisted = get().persistedPage;
         if (!persisted || persisted.id !== page.id) throw new Error("缺少页面保存基线，请重新打开页面");
         const savedPage = await api.updatePage(page.id, page.title, page.content, persisted.title, persisted.content);
-        const [links, backlinks, history] = await Promise.all([api.getPageLinks(savedPage.id), api.getPageBacklinks(savedPage.id), api.getPageHistory(savedPage.id)]);
+        invalidateBundles();
+        const [links, backlinks] = await Promise.all([api.getPageLinks(savedPage.id), api.getPageBacklinks(savedPage.id)]);
         const current = get().activePage;
         const unchanged = current?.id === page.id && current.title === page.title && current.content === page.content;
-        if (unchanged) set({ activePage: savedPage, persistedPage: savedPage, links, backlinks, history, saveState: "saved", error: null });
-        else if (current?.id === page.id) { set({ persistedPage: savedPage, links, backlinks, history, saveState: "dirty", error: null }); scheduleAutoSave(get().save); }
-        await get().refresh();
+        if (unchanged) set({ activePage: savedPage, persistedPage: savedPage, links, backlinks, saveState: "saved", error: null });
+        else if (current?.id === page.id) { set({ persistedPage: savedPage, links, backlinks, saveState: "dirty", error: null }); scheduleAutoSave(get().save); }
+        set((state) => ({ pages: state.pages.map((entry) => entry.id === savedPage.id && entry.title !== savedPage.title ? { ...entry, title: savedPage.title } : entry) }));
       } catch (error) {
         const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
         set({ saveState: code === "page_write_conflict" ? "conflict" : "error", error: failure(error) });
@@ -196,8 +238,9 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
   trashPageRecursive: async (id) => { if (!(await flushPendingSave(get))) return; try { await api.trashPageRecursive(id); set({ activePage: null, activeDocument: null, persistedPage: null, targetBlockId: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
   restore: async (id) => { try { await api.restorePage(id); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
   purge: async (id) => { try { await api.purgePage(id); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
-  search: async (query) => { set({ searchQuery: query }); if (!query.trim()) { set({ searchResults: [] }); return; } try { set({ searchResults: await api.searchPages(query), error: null }); } catch (error) { set({ error: failure(error) }); } },
+  search: async (query) => { const sequence = ++searchSequence; set({ searchQuery: query }); if (!query.trim()) { set({ searchResults: [] }); return; } try { const results = await api.searchPages(query); if (sequence === searchSequence) set({ searchResults: results, error: null }); } catch (error) { if (sequence === searchSequence) set({ error: failure(error) }); } },
   handleExternalChange: async (change) => {
+    invalidateBundles();
     const active = get().activePage;
     await get().refresh();
     if (!active) return;
@@ -214,7 +257,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       set({ saveState: "conflict", error: "磁盘版本已发生变化；当前未保存内容已保留，请重新打开页面核对" });
       return;
     }
-    try { await api.getPage(active.id); await get().open(active.id); } catch { set({ activePage: null, activeDocument: null, persistedPage: null, saveState: "idle" }); }
+    try { await api.getPage(active.id); await get().reload(active.id); } catch { set({ activePage: null, activeDocument: null, persistedPage: null, saveState: "idle" }); }
   },
   discardConflictAndReload: async () => {
     const active = get().activePage;

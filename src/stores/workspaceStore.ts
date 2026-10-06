@@ -33,6 +33,6 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
   agentPanelWidth: storedWidth("qingyu.agentPanelWidth", 360, 300, 560),
   setSidebarWidth: (width) => set(() => { const next = clamp(width, 220, 420); persistWidth("qingyu.sidebarWidth", next); return { sidebarWidth: next }; }),
   setAgentPanelWidth: (width) => set(() => { const next = clamp(width, 300, 560); persistWidth("qingyu.agentPanelWidth", next); return { agentPanelWidth: next }; }),
-  toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
-  toggleAgentPanel: () => set((state) => ({ agentPanelOpen: !state.agentPanelOpen })),
+  toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen, ...(window.innerWidth < 850 && !state.sidebarOpen ? { agentPanelOpen: false } : {}) })),
+  toggleAgentPanel: () => set((state) => ({ agentPanelOpen: !state.agentPanelOpen, ...(window.innerWidth < 850 && !state.agentPanelOpen ? { sidebarOpen: false } : {}) })),
 }));

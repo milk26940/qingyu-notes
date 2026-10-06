@@ -1,8 +1,6 @@
 import CodeBlock from "@tiptap/extension-code-block";
 import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type NodeViewProps } from "@tiptap/react";
-import { basicSetup } from "codemirror";
-import { EditorState } from "@codemirror/state";
-import { EditorView as CodeMirrorView } from "@codemirror/view";
+import type { EditorView } from "@codemirror/view";
 import { Code2, Eye } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
@@ -12,6 +10,10 @@ function CodeBlockView(props: NodeViewProps) {
   const [svg, setSvg] = useState("");
   const [error, setError] = useState("");
   const codeMirrorHost = useRef<HTMLDivElement>(null);
+  const codeMirror = useRef<EditorView | null>(null);
+  const propsRef = useRef(props);
+  const syncing = useRef(false);
+  propsRef.current = props;
   useEffect(() => {
     if (!mermaidBlock || source) return;
     let disposed = false;
@@ -35,21 +37,34 @@ function CodeBlockView(props: NodeViewProps) {
   }, [mermaidBlock, props.node.textContent, source]);
   useEffect(() => {
     if (!source || !codeMirrorHost.current) return;
-    const view = new CodeMirrorView({
-      parent: codeMirrorHost.current,
-      state: EditorState.create({
-        doc: props.node.textContent,
-        extensions: [basicSetup, CodeMirrorView.lineWrapping, CodeMirrorView.updateListener.of((update) => {
-          if (!update.docChanged) return;
-          const position = props.getPos();
-          if (typeof position !== "number") return;
-          const text = update.state.doc.toString();
-          props.editor.view.dispatch(props.editor.state.tr.replaceWith(position + 1, position + props.node.nodeSize - 1, text ? props.editor.schema.text(text) : []));
-        })],
-      }),
-    });
-    return () => view.destroy();
-  }, [props.editor, props.getPos, props.node.nodeSize, props.node.textContent, source]);
+    let disposed = false;
+    void Promise.all([import("codemirror"), import("@codemirror/state"), import("@codemirror/view")]).then(([{ basicSetup }, { EditorState }, { EditorView }]) => {
+      if (disposed || !codeMirrorHost.current) return;
+      const view = new EditorView({
+        parent: codeMirrorHost.current,
+        state: EditorState.create({
+          doc: propsRef.current.node.textContent,
+          extensions: [basicSetup, EditorView.lineWrapping, EditorView.updateListener.of((update) => {
+            if (!update.docChanged || syncing.current) return;
+            const current = propsRef.current;
+            const position = current.getPos();
+            if (typeof position !== "number") return;
+            const text = update.state.doc.toString();
+            current.editor.view.dispatch(current.editor.state.tr.replaceWith(position + 1, position + current.node.nodeSize - 1, text ? current.editor.schema.text(text) : []));
+          })],
+        }),
+      });
+      codeMirror.current = view;
+    }).catch((cause) => { if (!disposed) setError(cause instanceof Error ? cause.message : String(cause)); });
+    return () => { disposed = true; codeMirror.current?.destroy(); codeMirror.current = null; };
+  }, [source, props.editor]);
+  useEffect(() => {
+    const view = codeMirror.current;
+    if (!view || view.state.doc.toString() === props.node.textContent) return;
+    syncing.current = true;
+    try { view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: props.node.textContent } }); }
+    finally { syncing.current = false; }
+  }, [props.node.textContent]);
   return <NodeViewWrapper className="qy-code-node">
     <div className="qy-code-node-toolbar" contentEditable={false}>
       <span>{mermaidBlock ? "Mermaid" : props.node.attrs.language || "代码"}</span>

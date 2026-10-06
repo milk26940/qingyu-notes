@@ -1,4 +1,4 @@
-import { useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
 type PanelResizeHandleProps = {
   side: "left" | "right";
@@ -11,6 +11,9 @@ type PanelResizeHandleProps = {
 export function PanelResizeHandle({ side, value, min, max, onResize }: PanelResizeHandleProps) {
   const dragRef = useRef<{ x: number; width: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const frame = useRef(0);
+  const nextWidth = useRef(value);
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
   const label = side === "left" ? "调整左侧栏宽度" : "调整右侧栏宽度";
   const resize = (width: number) => onResize(Math.min(max, Math.max(min, width)));
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -22,9 +25,11 @@ export function PanelResizeHandle({ side, value, min, max, onResize }: PanelResi
     const start = dragRef.current;
     if (!start) return;
     const distance = event.clientX - start.x;
-    resize(start.width + (side === "left" ? distance : -distance));
+    nextWidth.current = start.width + (side === "left" ? distance : -distance);
+    if (!frame.current) frame.current = requestAnimationFrame(() => { frame.current = 0; resize(nextWidth.current); });
   };
   const stopDragging = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (frame.current) { cancelAnimationFrame(frame.current); frame.current = 0; resize(nextWidth.current); }
     dragRef.current = null;
     setDragging(false);
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);

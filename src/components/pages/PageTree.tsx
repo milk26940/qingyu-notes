@@ -1,11 +1,11 @@
 import { ChevronDown, ChevronRight, Database, FilePlus2, FileText, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { usePagesStore } from "../../stores/pagesStore";
 import type { PageSummary } from "../../lib/tauri/pages";
 import { useDatabaseStore } from "../../stores/databaseStore";
 import { DeleteConfirmDialog, countDescendants } from "./DeleteConfirmDialog";
 
-function TreeNode({ page, childrenByParent, onOpen, depth = 0, onRequestDelete }: { page: PageSummary; childrenByParent: Map<string | null, PageSummary[]>; onOpen?: (pageId: string) => void; depth?: number; onRequestDelete?: (page: PageSummary) => void }) {
+const TreeNode = memo(function TreeNode({ page, childrenByParent, onOpen, depth = 0, onRequestDelete }: { page: PageSummary; childrenByParent: Map<string | null, PageSummary[]>; onOpen?: (pageId: string) => void; depth?: number; onRequestDelete?: (page: PageSummary) => void }) {
   const [expanded, setExpanded] = useState(true);
   const children = childrenByParent.get(page.id) ?? [];
   const isActive = usePagesStore((state) => (state.openingPageId ?? state.activePage?.id) === page.id);
@@ -20,8 +20,10 @@ function TreeNode({ page, childrenByParent, onOpen, depth = 0, onRequestDelete }
   useEffect(() => {
     if (!menu) return;
     const close = (event: PointerEvent) => { if (!menuRef.current?.contains(event.target as Node)) setMenu(null); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setMenu(null); };
+    document.addEventListener("keydown", escape);
     document.addEventListener("pointerdown", close);
-    return () => document.removeEventListener("pointerdown", close);
+    return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", escape); };
   }, [menu]);
   const createChild = async (kind: "page" | "database") => {
     const { activePage, activeDocument } = usePagesStore.getState();
@@ -67,14 +69,25 @@ function TreeNode({ page, childrenByParent, onOpen, depth = 0, onRequestDelete }
       event.stopPropagation();
     }
   }}>
-    <div draggable onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }} onDragStart={(event) => event.dataTransfer.setData("text/qingyu-page", page.id)} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop} className={`group relative flex h-9 cursor-pointer items-center gap-1 rounded-xl pr-1 text-[14px] font-semibold ${isActive ? "bg-[var(--qy-selected)] text-[var(--qy-ink)] shadow-sm" : "text-[var(--qy-muted)] hover:bg-white"}`} style={{ paddingLeft: `${8 + depth * 16}px` }}>
+    <div role="treeitem" aria-expanded={children.length ? expanded : undefined} data-page-id={page.id} draggable onKeyDown={(event) => {
+      if (event.nativeEvent.isComposing || (event.target as HTMLElement).closest("[data-tree-menu]")) return;
+      const button = event.currentTarget.querySelector<HTMLButtonElement>("[data-tree-open]");
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const buttons = Array.from(event.currentTarget.closest('[role="tree"]')?.querySelectorAll<HTMLButtonElement>("[data-tree-open]") ?? []);
+        const index = buttons.indexOf(button!);
+        buttons[index + (event.key === "ArrowDown" ? 1 : -1)]?.focus();
+      } else if (event.key === "ArrowRight" && children.length) { event.preventDefault(); setExpanded(true); }
+      else if (event.key === "ArrowLeft") { event.preventDefault(); if (expanded && children.length) setExpanded(false); else event.currentTarget.closest('[role="tree"]')?.querySelector<HTMLButtonElement>(`[data-page-id="${page.parentId}"] [data-tree-open]`)?.focus(); }
+      else if (event.key === "F2") { event.preventDefault(); void open(page.id).then(() => { onOpen?.(page.id); requestAnimationFrame(() => { const title = document.querySelector<HTMLInputElement>('[aria-label="页面标题"]'); title?.focus(); title?.select(); }); }); }
+    }} onContextMenu={(event) => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY }); }} onDragStart={(event) => event.dataTransfer.setData("text/qingyu-page", page.id)} onDragOver={(event) => event.preventDefault()} onDrop={handleDrop} className={`group relative flex h-9 cursor-pointer items-center gap-1 rounded-xl pr-1 text-[14px] font-semibold ${isActive ? "bg-[var(--qy-selected)] text-[var(--qy-ink)] shadow-sm" : "text-[var(--qy-muted)] hover:bg-white"}`} style={{ paddingLeft: `${8 + depth * 16}px` }}>
       <button type="button" className="grid h-5 w-5 place-items-center" aria-label={expanded ? `收起${page.title}` : `展开${page.title}`} onClick={() => setExpanded((value) => !value)}>{children.length ? (expanded ? <ChevronDown size={15} strokeWidth={2} /> : <ChevronRight size={15} strokeWidth={2} />) : null}</button>
-      <button type="button" className="flex min-w-0 flex-1 items-center gap-2 truncate text-left" onMouseEnter={() => prefetch(page.id)} onClick={() => onOpen ? onOpen(page.id) : void open(page.id)}>{page.kind === "database" ? <Database size={15} strokeWidth={2}/> : <FileText size={15} strokeWidth={2}/>}<span className="truncate">{page.title}</span></button>
-      {menu && <div ref={menuRef} className="fixed z-50 min-w-44 rounded-2xl border border-[var(--qy-border)] bg-white p-1.5 text-[12px] shadow-[var(--qy-float-shadow)]" style={{ left: menu.x, top: menu.y }} onClick={(event) => event.stopPropagation()}>{page.kind === "database" ? <button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[var(--qy-bg)]" onClick={() => void createEntry()}><FilePlus2 size={14}/>新建条目页面</button> : <><button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[var(--qy-bg)]" onClick={() => void createChild("page")}><FilePlus2 size={14}/>新建子页面</button><button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[var(--qy-bg)]" onClick={() => void createChild("database")}><Database size={13}/>新建数据库</button></>}<button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[#b42318] hover:bg-[#fef3f2]" onClick={removePage}><Trash2 size={14}/>递归删除</button></div>}
+      <button type="button" data-tree-open title={page.title} className="flex min-w-0 flex-1 items-center gap-2 truncate text-left" onMouseEnter={() => prefetch(page.id)} onClick={() => onOpen ? onOpen(page.id) : void open(page.id)}>{page.kind === "database" ? <Database size={15} strokeWidth={2}/> : <FileText size={15} strokeWidth={2}/>}<span className="truncate">{page.title}</span></button>
+      {menu && <div data-tree-menu ref={menuRef} className="fixed z-50 min-w-44 rounded-2xl border border-[var(--qy-border)] bg-white p-1.5 text-[12px] shadow-[var(--qy-float-shadow)]" style={{ left: Math.min(menu.x, window.innerWidth - 200), top: Math.max(8, Math.min(menu.y, window.innerHeight - 160)) }} onClick={(event) => event.stopPropagation()}>{page.kind === "database" ? <button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[var(--qy-bg)]" onClick={() => void createEntry()}><FilePlus2 size={14}/>新建条目页面</button> : <><button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[var(--qy-bg)]" onClick={() => void createChild("page")}><FilePlus2 size={14}/>新建子页面</button><button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left hover:bg-[var(--qy-bg)]" onClick={() => void createChild("database")}><Database size={13}/>新建数据库</button></>}<button type="button" className="flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-[#b42318] hover:bg-[#fef3f2]" onClick={removePage}><Trash2 size={14}/>递归删除</button></div>}
     </div>
     {expanded && children.map((child) => <TreeNode key={child.id} page={child} childrenByParent={childrenByParent} onOpen={onOpen} depth={depth + 1} onRequestDelete={onRequestDelete} />)}
   </div>;
-}
+});
 
 export function PageTree({ onOpen }: { onOpen?: (pageId: string) => void }) {
   const pages = usePagesStore((state) => state.pages);
@@ -85,7 +98,7 @@ export function PageTree({ onOpen }: { onOpen?: (pageId: string) => void }) {
   const childrenByParent = useMemo(() => pages.reduce((map, page) => { const list = map.get(page.parentId) ?? []; list.push(page); map.set(page.parentId, list); return map; }, new Map<string | null, PageSummary[]>()), [pages]);
   return <div className="mt-2">
     <div className="mb-1 flex items-center justify-between px-2 text-[12px] font-semibold uppercase tracking-wider text-[var(--qy-faint)]"><span>我的页面</span><button type="button" className="icon-button h-6 w-6" title="新建页面" aria-label="新建页面" onClick={() => void create()}><FilePlus2 size={15} strokeWidth={2} /></button></div>
-    <div aria-label="移动到根目录" className="min-h-8" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData("text/qingyu-page"); if (id) void move(id, null); }}>{(childrenByParent.get(null) ?? []).map((page) => <TreeNode key={page.id} page={page} childrenByParent={childrenByParent} onOpen={onOpen} onRequestDelete={setDeleteTarget} />)}</div>
+    <div role="tree" aria-label="移动到根目录" className="min-h-8" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData("text/qingyu-page"); if (id) void move(id, null); }}>{(childrenByParent.get(null) ?? []).map((page) => <TreeNode key={page.id} page={page} childrenByParent={childrenByParent} onOpen={onOpen} onRequestDelete={setDeleteTarget} />)}</div>
     {deleteTarget && (
       <DeleteConfirmDialog
         open={Boolean(deleteTarget)}

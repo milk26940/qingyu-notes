@@ -1,7 +1,7 @@
 import { WorkspaceShell } from "../components/layout/WorkspaceShell";
-import { AgentPanel } from "../components/agent/AgentPanel";
+const AgentPanel = lazy(() => import("../components/agent/AgentPanel").then((module) => ({ default: module.AgentPanel })));
 import { BlockEditor } from "../components/editor/BlockEditor";
-import { useEffect } from "react";
+import { lazy, Suspense, useCallback, useEffect } from "react";
 import { usePagesStore } from "../stores/pagesStore";
 import {
   DatabaseRecordProperties,
@@ -27,6 +27,7 @@ import { PageSearch } from "../components/pages/PageSearch";
 function App() {
   const {
     activePage,
+    openingPageId,
     activeDocument,
     targetBlockId,
     pages,
@@ -50,6 +51,13 @@ function App() {
   const [activeNav, setActiveNav] = useState<SidebarNav>("页面");
   const [tabs, setTabs] = useState<PageTab[]>([]);
   const [selectedText, setSelectedText] = useState("");
+  const [showLoading, setShowLoading] = useState(false);
+  useEffect(() => {
+    setShowLoading(false);
+    if (!openingPageId) return;
+    const timer = setTimeout(() => setShowLoading(true), 120);
+    return () => clearTimeout(timer);
+  }, [openingPageId]);
   useEffect(() => {
     if (!activePage) return;
     setTabs((current) =>
@@ -62,10 +70,10 @@ function App() {
         : [...current, { pageId: activePage.id, title: activePage.title }],
     );
   }, [activePage]);
-  const openPage = (id: string, blockId?: string | null) => {
+  const openPage = useCallback((id: string, blockId?: string | null) => {
     setActiveNav("页面");
     void open(id, blockId);
-  };
+  }, [open]);
   const closeTabs = (ids: string[]) => {
     const closing = new Set(ids);
     setTabs((current) => {
@@ -110,6 +118,11 @@ function App() {
   }, [init]);
   useEffect(() => {
     const handleSave = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault(); setActiveNav("搜索");
+        requestAnimationFrame(() => document.querySelector<HTMLInputElement>('[aria-label="搜索笔记"]')?.focus());
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void save();
@@ -231,11 +244,12 @@ function App() {
       unlisten?.();
     };
   }, [vaultPath]);
+  const clearSelectedText = useCallback(() => setSelectedText(""), []);
   const rightPanel = (
-    <AgentPanel
+    <Suspense fallback={<aside aria-label="Agent 面板" className="grid h-full w-full place-items-center rounded-[22px] bg-[var(--qy-sidebar)] text-sm text-[var(--qy-faint)]">加载 Agent…</aside>}><AgentPanel
       selectedText={selectedText}
-      onClearSelection={() => setSelectedText("")}
-    />
+      onClearSelection={clearSelectedText}
+    /></Suspense>
   );
   return (
     <WorkspaceShell
@@ -249,7 +263,8 @@ function App() {
       onCloseTabs={closeTabs}
       agentPanel={rightPanel}
     >
-      <div className="flex h-full flex-col">
+      <div className="relative flex h-full flex-col">
+        {showLoading && openingPageId && <div className="qy-page-loading" role="status" aria-label="加载页面"><span /><span /><span /><p className="text-sm text-[var(--qy-faint)]">加载页面…</p></div>}
         {error && (
           <div className="flex items-center gap-2 border-b border-red-200 bg-red-50 px-5 py-2 text-[12px] text-red-700">
             <span className="min-w-0 flex-1 truncate">{error}</span>
@@ -288,17 +303,18 @@ function App() {
                 target?.scrollIntoView({ behavior: "smooth", block: "center" });
               }}
             />
-            <div className="h-full overflow-y-auto px-5 py-5">
+            <div className="qy-page-scroll h-full overflow-y-auto px-5 py-5">
               <input
                 aria-label="页面标题"
                 value={activePage.title}
                 onChange={(event) => editTitle(event.target.value)}
-                className="mb-5 w-full border-0 text-2xl font-semibold outline-none"
+                className="mb-5 w-full border-0 pr-12 text-2xl font-semibold outline-none"
               />
               {activePage.kind === "databaseRecord" && (
                 <DatabaseRecordProperties record={activePage} />
               )}
               {activeDocument && <BlockEditor
+                key={activePage.id}
                 document={activeDocument}
                 pages={pages}
                 targetBlockId={targetBlockId}

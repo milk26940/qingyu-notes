@@ -36,12 +36,13 @@ const page = (id: string, content: string): Page => ({
 });
 
 describe("页面自动保存", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.useFakeTimers();
     vi.mocked(api.listPages).mockResolvedValue([]);
     vi.mocked(api.getPageLinks).mockResolvedValue([]);
     vi.mocked(api.getPageBacklinks).mockResolvedValue([]);
     vi.mocked(api.getPageHistory).mockResolvedValue([]);
+    await usePagesStore.getState().refresh();
     usePagesStore.setState({
       vaultPath: "C:\\notes",
       pages: [],
