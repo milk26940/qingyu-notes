@@ -5,7 +5,7 @@ export type ConversationScope = { kind: "vault" } | { kind: "page"; pageId: stri
 export type ConversationMetadata = { id: string; threadId: string | null; title: string; scope: ConversationScope; createdAt: string; updatedAt: string; activeTurnId: string | null };
 export type ConversationRecord = { kind: string; timestamp: string; data: Record<string, unknown> };
 export type ConversationAttachment = { id: string; name: string; mime: string; size: number; relativePath: string };
-export type CodexItemSummary = { id?: string; itemType?: string; status?: string; tool?: string; namespace?: string };
+export type CodexItemSummary = { id?: string; itemType?: string; status?: string; tool?: string; namespace?: string; phase?: string | null; text?: string | null };
 export type CodexStreamEvent =
   | { kind: "agentMessageDelta"; threadId: string; turnId: string; itemId: string; delta: string }
   | { kind: "turnPlanUpdated"; threadId: string; turnId: string; explanation?: string; plan: unknown }

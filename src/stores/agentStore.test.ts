@@ -26,7 +26,7 @@ describe("useAgentStore", () => {
   beforeEach(() => {
     useAgentStore.setState({
       conversations: [], activeId: null, records: [], streamingText: "", plan: null,
-      diff: "", tools: [], approvals: [], sending: false, error: null,
+      diff: "", tools: [], approvals: [], sending: false, error: null, queue: {}, queuePaused: {}, selectedModel: null, conversationModels: {},
     });
     Object.values(api).forEach((mock) => mock.mockReset());
     api.listConversations.mockResolvedValue([]);
@@ -58,11 +58,38 @@ describe("useAgentStore", () => {
     eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-1", status: "completed" } });
 
     const state = useAgentStore.getState();
-    expect(state.records[state.records.length - 1]?.data.delta).toBe("你好");
+    expect(state.records.find((item) => item.kind === "agentMessageDelta")?.data.delta).toBe("你好");
+    expect(state.records[state.records.length - 1]?.kind).toBe("turnCompleted");
     expect(state.plan).toEqual([{ step: "读取" }]);
     expect(state.diff).toBe("+ 新内容");
     expect(state.tools).toEqual([{ id: "tool-1", tool: "read", namespace: "page", status: "completed" }]);
     expect(state.sending).toBe(false);
+  });
+
+  it("上一轮请求应答落后于完成事件时仍串行发送，失败后暂停队列", async () => {
+    let eventHandler: (event: any) => void = () => undefined;
+    api.subscribeConversationEvents.mockImplementation(async (handler) => { eventHandler = handler; return () => undefined; });
+    const conversation = { id: "queue", threadId: "thread", title: "队列", scope: { kind: "vault" as const }, createdAt: "0", updatedAt: "0", activeTurnId: null };
+    api.listConversations.mockResolvedValue([conversation]);
+    useAgentStore.setState({ conversations: [conversation], activeId: "queue" });
+    await useAgentStore.getState().initialize();
+    let resolveFirst!: (value: { threadId: string; turnId: string }) => void;
+    api.sendConversationMessage.mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; })).mockResolvedValue({ threadId: "thread", turnId: "second" });
+    const pending = useAgentStore.getState().send("第一轮");
+    useAgentStore.getState().enqueue({ requestText: "第二轮" });
+    eventHandler({ kind: "turnStarted", threadId: "thread", turn: { id: "first" } });
+    eventHandler({ kind: "turnCompleted", threadId: "thread", turn: { id: "first", status: "completed" } });
+    await Promise.resolve();
+    expect(api.sendConversationMessage).toHaveBeenCalledTimes(1);
+    resolveFirst({ threadId: "thread", turnId: "first" });
+    await pending;
+    await vi.waitFor(() => expect(api.sendConversationMessage).toHaveBeenCalledTimes(2));
+    expect(useAgentStore.getState().conversations[0].activeTurnId).toBe("second");
+    useAgentStore.getState().enqueue({ requestText: "第三轮" });
+    eventHandler({ kind: "turnCompleted", threadId: "thread", turn: { id: "second", status: "failed", error: { message: "连接失败" } } });
+    await Promise.resolve();
+    expect(useAgentStore.getState().queuePaused.queue).toBe(true);
+    expect(useAgentStore.getState().queue.queue).toHaveLength(1);
   });
 
   it("区分上游失败和主动中止", async () => {
@@ -76,8 +103,8 @@ describe("useAgentStore", () => {
     eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-1", status: "failed", error: { message: "上游连接中断" } } });
     expect(useAgentStore.getState().error).toBe("上游连接中断");
 
-    useAgentStore.setState({ sending: true, error: null });
-    eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-1", status: "interrupted", error: null } });
+    useAgentStore.setState({ sending: true, error: null, conversations: [{ ...conversation, activeTurnId: "turn-2" }] });
+    eventHandler({ kind: "turnCompleted", threadId: "thread-1", turn: { id: "turn-2", status: "interrupted", error: null } });
     expect(useAgentStore.getState().error).toBeNull();
   });
 
@@ -202,7 +229,7 @@ describe("useAgentStore", () => {
     // 切换到另一个已有对话，模型选择同步切换
     api.getConversationHistory.mockResolvedValue([]);
     useAgentStore.setState({
-      conversationModels: { "conv-with-model": "gpt-4o", "conv-other": "claude-3-5-sonnet" },
+      sending: false, conversationModels: { "conv-with-model": "gpt-4o", "conv-other": "claude-3-5-sonnet" },
     });
     await useAgentStore.getState().open("conv-other");
     expect(useAgentStore.getState().selectedModel).toBe("claude-3-5-sonnet");

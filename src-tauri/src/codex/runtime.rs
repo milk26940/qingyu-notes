@@ -539,6 +539,7 @@ impl CodexRuntime {
             ));
         }
         let stdin = self.stdin().await?;
+        let before = self.change_snapshot(&approval.namespace, &approval.arguments).await;
         let result = if approved {
             let pages = self
                 .pages
@@ -588,6 +589,7 @@ impl CodexRuntime {
                 );
             }
         }
+        self.finish_activity(app, &approval.thread_id, &approval.turn_id, &approval.id, &approval.namespace, &approval.tool, &approval.arguments, before, &result).await;
         if result.is_ok() {
             emit_vault_change(
                 app,
@@ -726,10 +728,12 @@ impl CodexRuntime {
                 let _ = app.emit("codex://persistence-error", error);
             }
         }
+        self.emit_activity(app, &thread_id, json!({ "turnId": turn_id, "callId": call_id, "namespace": namespace, "tool": tool, "stage": "started", "arguments": arguments })).await;
         if is_dangerous(&namespace, &tool) {
             let diff = match self.describe_change(&namespace, &tool, &arguments).await {
                 Ok(diff) => diff,
                 Err(error) => {
+                    self.emit_activity(app, &thread_id, json!({ "turnId": turn_id, "callId": call_id, "namespace": namespace, "tool": tool, "stage": "completed", "success": false, "error": error.message })).await;
                     let _ = write_tool_result(stdin, request.id, Err(error)).await;
                     return;
                 }
@@ -791,7 +795,9 @@ impl CodexRuntime {
                 }
                 let _ = app.emit("codex://event", event);
             }
+            let before = if is_write_tool(&namespace, &tool) { self.change_snapshot(&namespace, &arguments).await } else { None };
             let result = self.execute_tool(&namespace, &tool, &arguments).await;
+            self.finish_activity(app, &thread_id, &turn_id, &call_id, &namespace, &tool, &arguments, before, &result).await;
             if let Some(store) = self.conversations.read().await.clone() {
                 let _ = store.append_tool_outcome(
                     &thread_id,
@@ -812,6 +818,51 @@ impl CodexRuntime {
             }
             let _ = write_tool_result(stdin, request.id, result).await;
         }
+    }
+
+    async fn emit_activity(&self, app: &AppHandle, thread_id: &str, data: Value) {
+        if let Some(store) = self.conversations.read().await.clone() {
+            if let Err(error) = store.append_for_thread(thread_id, "toolActivity", data.clone()) {
+                let _ = app.emit("codex://persistence-error", error);
+            }
+        }
+        let _ = app.emit("codex://event", CodexEvent::Other {
+            method: "qingyu/toolActivity".into(),
+            params: json!({ "threadId": thread_id, "data": data }),
+        });
+    }
+
+    async fn change_snapshot(&self, namespace: &str, arguments: &Value) -> Option<Value> {
+        let pages = self.pages.read().await.clone()?;
+        if namespace == "database" && arguments.get("schema").is_some() {
+            let id = arguments.get("databaseId")?.as_str()?;
+            let schema = DatabaseRepository::from_pages(pages.clone()).ok()?.get(id).ok()?;
+            let page = pages.get(&schema.page_id, false).ok()?;
+            return Some(json!({ "pageId": page.id, "title": page.title, "content": serde_json::to_string_pretty(&schema).ok()? }));
+        }
+        let id = arguments.get("pageId").or_else(|| arguments.get("id")).or_else(|| arguments.get("sourceId"))?.as_str()?;
+        let page = pages.get(id, false).ok()?;
+        let content = if page.database_id.is_some() {
+            format!("{}\n\n{}", page.content, serde_json::to_string_pretty(&page.properties).ok()?)
+        } else { page.content };
+        Some(json!({ "pageId": page.id, "title": page.title, "content": content }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_activity(&self, app: &AppHandle, thread_id: &str, turn_id: &str, call_id: &str, namespace: &str, tool: &str, arguments: &Value, before: Option<Value>, result: &Result<Value, AppError>) {
+        let mut data = json!({ "turnId": turn_id, "callId": call_id, "namespace": namespace, "tool": tool, "stage": "completed", "success": result.is_ok() });
+        if let Err(error) = result { data["error"] = json!(error.message); }
+        if result.is_ok() && is_write_tool(namespace, tool) {
+            let mut target = arguments.clone();
+            if let Ok(value) = result {
+                if let Some(id) = value.get("id").or_else(|| value.get("pageId")).and_then(Value::as_str) {
+                    target["id"] = json!(id);
+                }
+            }
+            let after = self.change_snapshot(namespace, &target).await;
+            data["change"] = json!({ "before": before, "after": after, "blockId": arguments.get("blockId").or_else(|| arguments.pointer("/block/id")), "operation": tool });
+        }
+        self.emit_activity(app, thread_id, data).await;
     }
 
     async fn execute_tool(

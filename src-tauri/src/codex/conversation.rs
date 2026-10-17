@@ -409,7 +409,7 @@ impl ConversationStore {
             .find(|conversation| conversation.thread_id.as_deref() == Some(thread_id)))
     }
 
-    fn append_for_thread(&self, thread_id: &str, kind: &str, data: Value) -> Result<(), AppError> {
+    pub(crate) fn append_for_thread(&self, thread_id: &str, kind: &str, data: Value) -> Result<(), AppError> {
         let Some(conversation) = self.by_thread(thread_id)? else {
             return Ok(());
         };

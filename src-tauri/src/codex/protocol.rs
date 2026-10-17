@@ -37,6 +37,10 @@ pub struct CodexItemSummary {
     pub status: Option<String>,
     pub tool: Option<String>,
     pub namespace: Option<String>,
+    #[serde(default)]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -264,13 +268,15 @@ fn parse_event(method: &str, params: Value) -> CodexEvent {
 fn summarize_item(item: Option<&Value>) -> CodexItemSummary {
     let item = item.unwrap_or(&Value::Null);
     CodexItemSummary {
-        id: item.get("id").and_then(Value::as_str).map(str::to_owned),
+        id: item.get("callId").or_else(|| item.get("id")).and_then(Value::as_str).map(str::to_owned),
         item_type: item.get("type").and_then(Value::as_str).map(str::to_owned),
         status: item
             .get("status")
             .and_then(Value::as_str)
             .map(str::to_owned),
         tool: item.get("tool").and_then(Value::as_str).map(str::to_owned),
+        phase: item.get("phase").and_then(Value::as_str).map(str::to_owned),
+        text: item.get("text").and_then(Value::as_str).map(str::to_owned),
         namespace: item
             .get("namespace")
             .and_then(Value::as_str)

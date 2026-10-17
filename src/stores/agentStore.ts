@@ -8,9 +8,19 @@ export type SendMessageOptions = {
   selectedText?: string;
   attachments?: ConversationAttachment[];
   scope?: ConversationScope;
+  model?: string | null;
 };
 
+export type QueuedMessage = { id: string; input: SendMessageOptions };
+
 type AgentStore = {
+  queue: Record<string, QueuedMessage[]>;
+  queuePaused: Record<string, boolean>;
+  resumeQueue: () => void;
+  enqueue: (input: SendMessageOptions) => void;
+  editQueued: (id: string, input: SendMessageOptions) => void;
+  removeQueued: (id: string) => void;
+  sendNext: () => Promise<void>;
   conversations: ConversationMetadata[];
   activeId: string | null;
   selectedModel: string | null;
@@ -44,6 +54,7 @@ const DRAFT_MODEL_STORAGE_KEY = "qingyu-draft-model";
 const AGENT_INACTIVITY_TIMEOUT_MS = 300_000;
 const AGENT_TIMEOUT_MESSAGE = "Agent 连续 300 秒没有返回新内容，已停止本轮请求";
 
+let sendRequestPending = false;
 let activeTurnTimer: ReturnType<typeof setTimeout> | null = null;
 let activeTurnStopReason: "timeout" | "user" | null = null;
 
@@ -81,6 +92,8 @@ function armActiveTurnTimer(threadId: string, turnId: string): void {
     useAgentStore.setState((current) => ({
       sending: false,
       error: AGENT_TIMEOUT_MESSAGE,
+      records: [...current.records, record("turnCompleted", { id: turnId, status: "failed", error: { message: AGENT_TIMEOUT_MESSAGE } })],
+      queuePaused: { ...current.queuePaused, [current.activeId!]: true },
       conversations: current.conversations.map((item) =>
         item.id === current.activeId ? { ...item, activeTurnId: null } : item
       ),
@@ -166,6 +179,25 @@ const initialConversationModels = loadStoredConversationModels();
 const initialDraftModel = loadStoredDraftModel();
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
+  queue: {},
+  queuePaused: {},
+  resumeQueue: () => { const id = get().activeId; if (id) { set((state) => ({ queuePaused: { ...state.queuePaused, [id]: false } })); void get().sendNext(); } },
+  enqueue: (input) => {
+    const id = get().activeId;
+    if (!id) return;
+    const queued = { id: crypto.randomUUID(), input: { ...input, model: get().selectedModel } };
+    set((state) => ({ queue: { ...state.queue, [id]: [...(state.queue[id] ?? []), queued] } }));
+  },
+  editQueued: (id, input) => { const active = get().activeId; if (active) set((state) => ({ queue: { ...state.queue, [active]: (state.queue[active] ?? []).map((item) => item.id === id ? { ...item, input: { ...input, model: item.input.model } } : item) } })); },
+  removeQueued: (id) => { const active = get().activeId; if (active) set((state) => ({ queue: { ...state.queue, [active]: (state.queue[active] ?? []).filter((item) => item.id !== id) } })); },
+  sendNext: async () => {
+    const state = get(); const id = state.activeId;
+    if (!id || state.sending || sendRequestPending || state.queuePaused[id]) return;
+    const next = state.queue[id]?.[0];
+    if (!next) return;
+    set({ queue: { ...state.queue, [id]: state.queue[id].slice(1) } });
+    await get().send(next.input);
+  },
   conversations: [],
   activeId: null,
   selectedModel: initialDraftModel,
@@ -204,9 +236,19 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     };
     const handle = (event: CodexStreamEvent) => {
       const active = get().conversations.find((item) => item.id === get().activeId);
+      if (event.kind === "other" && event.method === "qingyu/toolActivity") {
+        const params = event.params as { threadId: string; data: Record<string, unknown> };
+        if (params.threadId !== active?.threadId) return;
+        flushDeltas();
+        set((state) => ({ records: [...state.records, record("toolActivity", params.data)] }));
+        if (get().sending && params.data.turnId) armActiveTurnTimer(params.threadId, String(params.data.turnId));
+        return;
+      }
       if ("threadId" in event && active?.threadId !== event.threadId) return;
       const eventTurnId = turnIdOf(event);
-      if ("threadId" in event && eventTurnId && get().sending) {
+      const closedTurn = eventTurnId && get().records.some((item) => item.kind === "turnCompleted" && String(item.data.id ?? "") === eventTurnId);
+      if (closedTurn && (event.kind === "turnStarted" || event.kind === "turnCompleted")) return;
+      if ("threadId" in event && eventTurnId && !closedTurn && get().sending) {
         armActiveTurnTimer(event.threadId, eventTurnId);
       }
       if (event.kind === "agentMessageDelta") {
@@ -215,6 +257,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         return;
       }
       flushDeltas();
+      if (event.kind !== "other") {
+        const data = event.kind === "turnStarted" || event.kind === "turnCompleted" ? event.turn : { ...event };
+        const kind = event.kind === "turnPlanUpdated" ? "planUpdated" : event.kind === "turnDiffUpdated" ? "diffUpdated" : event.kind;
+        set((state) => ({ records: [...state.records, record(kind, data)] }));
+      }
+      if (event.kind === "turnStarted") set((state) => ({ conversations: state.conversations.map((item) => item.id === state.activeId ? { ...item, activeTurnId: String(event.turn.id ?? "") } : item) }));
       if (event.kind === "turnPlanUpdated") set({ plan: event.plan });
       if (event.kind === "turnDiffUpdated") set({ diff: event.diff });
       if (event.kind === "itemStarted" || event.kind === "itemCompleted") {
@@ -222,6 +270,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         if (item) set((state) => ({ tools: [...state.tools.filter((entry) => entry.id !== item.id), item] }));
       }
       if (event.kind === "turnCompleted") {
+        if (active?.activeTurnId && active.activeTurnId !== String(event.turn.id ?? "")) return;
         clearActiveTurnTimer();
         const status = String(event.turn.status ?? "completed");
         const nextError = status === "failed" || status === "error"
@@ -229,14 +278,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           : status === "interrupted" && activeTurnStopReason === "timeout"
             ? get().error ?? AGENT_TIMEOUT_MESSAGE
             : null;
+        const shouldPause = status !== "completed" || activeTurnStopReason !== null;
         activeTurnStopReason = null;
         set((state) => ({
+          queuePaused: { ...state.queuePaused, [state.activeId!]: shouldPause || state.queuePaused[state.activeId!] === true },
           sending: false,
           error: nextError,
           conversations: state.conversations.map((item) =>
             item.id === state.activeId ? { ...item, activeTurnId: null } : item
           ),
         }));
+        if (!shouldPause) queueMicrotask(() => void get().sendNext());
       }
     };
     const unlistenEvents = await api.subscribeConversationEvents(handle);
@@ -271,6 +323,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       return conversation;
     } catch (error) { set({ error: errorMessage(error) }); return null; }
   },  open: async (id) => {
+    if (get().sending) return;
     try {
       const records = await api.getConversationHistory(id);
       const projection = projectConversationHistory(records);
@@ -281,6 +334,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
   },
   send: async (input, defaultScope, attachments = []) => {
+    if (get().sending || sendRequestPending) return;
+    sendRequestPending = true;
+    set({ sending: true, error: null, plan: null, diff: "", tools: [] });
     activeTurnStopReason = null;
     const isObject = typeof input === "object" && input !== null;
     const requestText = (isObject ? input.requestText : input) || "";
@@ -297,9 +353,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         (selectedText.trim() ? "选中文本" : "新对话");
       id = (await get().create(scope, title))?.id ?? null;
     }
-    if (!id) return;
+    if (!id) { sendRequestPending = false; set({ sending: false }); return; }
 
-    const model = get().conversationModels[id] ?? get().selectedModel ?? null;
+    const model = isObject && input.model !== undefined ? input.model : get().conversationModels[id] ?? get().selectedModel ?? null;
 
     set((state) => ({
       sending: true,
@@ -331,10 +387,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           item.id === id ? { ...item, threadId: turn.threadId, activeTurnId: stillSending ? turn.turnId : null } : item
         ),
       }));
-      if (stillSending) armActiveTurnTimer(turn.threadId, turn.turnId);
+      if (stillSending) {
+        armActiveTurnTimer(turn.threadId, turn.turnId);
+        if (activeTurnStopReason === "user") await get().interrupt();
+      }
     } catch (error) {
       clearActiveTurnTimer();
-      set({ sending: false, error: errorMessage(error) });
+      set((state) => ({ sending: false, error: errorMessage(error), queuePaused: { ...state.queuePaused, [state.activeId!]: true }, records: [...state.records, record("turnCompleted", { id: state.conversations.find((item) => item.id === id)?.activeTurnId, status: "failed", error: { message: errorMessage(error) } })] }));
+    } finally {
+      sendRequestPending = false;
+      if (!get().sending) queueMicrotask(() => void get().sendNext());
     }
   },
   uploadAttachments: async (files, defaultScope) => {
@@ -421,7 +483,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       set((state) => ({ conversations: state.conversations.map((item) => item.id === conversationId ? { ...item, activeTurnId: null } : item) }));
     }
   },
-  interrupt: async () => { const active = get().conversations.find((item) => item.id === get().activeId); if (!active?.threadId || !active.activeTurnId) return; try { activeTurnStopReason = "user"; await api.interruptConversation(active.threadId, active.activeTurnId); clearActiveTurnTimer(); set({ sending: false, error: null }); } catch (error) { activeTurnStopReason = null; set({ error: errorMessage(error) }); } },
+  interrupt: async () => { const active = get().conversations.find((item) => item.id === get().activeId); if (!active?.threadId || !active.activeTurnId) { if (get().sending) { activeTurnStopReason = "user"; set((state) => ({ queuePaused: { ...state.queuePaused, [state.activeId ?? "draft"]: true } })); } return; } try { activeTurnStopReason = "user"; set((state) => ({ queuePaused: { ...state.queuePaused, [state.activeId!]: true } })); await api.interruptConversation(active.threadId, active.activeTurnId); clearActiveTurnTimer(); set((state) => ({ sending: false, error: null, records: [...state.records, record("turnCompleted", { id: active.activeTurnId, status: "interrupted" })], conversations: state.conversations.map((item) => item.id === state.activeId ? { ...item, activeTurnId: null } : item) })); } catch (error) { activeTurnStopReason = null; set({ error: errorMessage(error) }); } },
   resolveApproval: async (id, approved) => {
     const approval = get().approvals.find((item) => item.id === id);
     try {
