@@ -71,7 +71,7 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
   const editor = useEditor({
     extensions,
     shouldRerenderOnTransaction: false,
-    content: documentToEditorContent(document),
+    content: documentToEditorContent(document, extensions),
     editable: !readOnly,
     editorProps: {
       attributes: { class: "qy-block-editor", spellcheck: "true" },
@@ -127,7 +127,7 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
     const pageId = document.pageId;
     const scroller = shellRef.current?.closest<HTMLElement>(".qy-page-scroll");
     const savedPosition = editorPositions.get(pageId);
-    const content = documentToEditorContent(document);
+    const content = documentToEditorContent(document, extensions);
     const restorePosition = () => {
       if (!savedPosition || targetBlockId) return;
       const size = editor.state.doc.content.size;

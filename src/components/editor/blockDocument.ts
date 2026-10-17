@@ -1,4 +1,5 @@
-import type { JSONContent } from "@tiptap/core";
+import { generateJSON, type Extensions, type JSONContent } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { readPageAsset, type BlockNode, type PageDocument } from "../../lib/tauri/pages";
@@ -18,25 +19,29 @@ export function bytesToDataUrl(mime: string, bytes: number[] | Uint8Array): stri
   return `data:${mime};base64,${base64}`;
 }
 
-export function documentToTiptap(document: PageDocument): JSONContent {
+export function documentToTiptap(document: PageDocument, extensions: Extensions = [StarterKit]): JSONContent {
   return {
     type: "doc",
     content: document.blocks.length
-      ? document.blocks.flatMap(blockToNodes)
+      ? document.blocks.flatMap((block) => blockToNodes(block, extensions))
       : [{ type: "paragraph", attrs: { blockId: id() } }],
   };
 }
 
-export function documentToEditorContent(document: PageDocument): JSONContent | string {
+function markdownToHtml(text: string): string {
+  const source = text
+    .replace(/<!--\s*qingyu-block:([A-Za-z0-9_-]+)\s*-->/g, '<p data-block-id="$1" class="qy-block-anchor"></p>\n\n')
+    .replace(/<aside[^>]*>/gi, "> ")
+    .replace(/<\/aside>/gi, "")
+    .replace(/^---\s*---$/gm, "---");
+  return DOMPurify.sanitize(marked.parse(source, { gfm: true, breaks: false }) as string, { ALLOW_UNKNOWN_PROTOCOLS: true });
+}
+
+export function documentToEditorContent(document: PageDocument, extensions: Extensions = [StarterKit]): JSONContent | string {
   if (document.blocks.length === 1 && document.blocks[0].type === "markdown") {
-    const source = document.blocks[0].text
-      .replace(/<!--\s*qingyu-block:([A-Za-z0-9_-]+)\s*-->/g, '<p data-block-id="$1" class="qy-block-anchor"></p>\n\n')
-      .replace(/<aside[^>]*>/gi, "> ")
-      .replace(/<\/aside>/gi, "")
-      .replace(/^---\s*---$/gm, "---");
-    return DOMPurify.sanitize(marked.parse(source, { gfm: true, breaks: false }) as string, { ALLOW_UNKNOWN_PROTOCOLS: true });
+    return markdownToHtml(document.blocks[0].text);
   }
-  return documentToTiptap(document);
+  return documentToTiptap(document, extensions);
 }
 
 export async function hydrateHtmlContent(
@@ -131,7 +136,15 @@ export async function hydrateEditorContent(
   return hydrateJsonContent(content, readAsset);
 }
 
-function blockToNodes(block: BlockNode): JSONContent[] {
+function blockToNodes(block: BlockNode, extensions: Extensions): JSONContent[] {
+  // Agent 可在富文本或 Markdown 页面中追加 Markdown，必须逐块解析后再交给编辑器。
+  if (block.type === "markdown") {
+    const parsed: JSONContent = generateJSON(markdownToHtml(block.text), extensions);
+    return (parsed.content ?? []).map((node, index) => ({
+      ...node,
+      attrs: { ...(node.attrs ?? {}), blockId: node.attrs?.blockId ?? (index === 0 ? block.id : `${block.id}-${index}`) },
+    }));
+  }
   const stored = block.attrs.node;
   if (stored && typeof stored === "object") {
     const node = stored as JSONContent;
