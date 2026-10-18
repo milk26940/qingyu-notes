@@ -496,8 +496,6 @@ export const AgentPanel = memo(function AgentPanel({
               {modelMenuOpen && createPortal(<div ref={modelOptionsRef} role="listbox" aria-label="模型列表" className="qy-model-options" style={{ position: "fixed", ...modelPosition }}>
                 <button type="button" role="option" aria-selected={selectedModel === null} onClick={() => { setSelectedModel(null); setModelMenuOpen(false); }}><span>默认模型<small>{defaultModel ? "当前配置默认：" + defaultModel.displayName : "使用 Agent 设置中的默认模型"}</small></span>{selectedModel === null && <Check size={14}/>}</button>
                 {models.map((item) => <button key={item.id} type="button" role="option" aria-selected={selectedModel === item.model} onClick={() => { setSelectedModel(item.model); setModelMenuOpen(false); }}><span>{item.displayName}{item.description && <small>{item.description}</small>}</span>{selectedModel === item.model && <Check size={14}/>}</button>)}
-                <label className="qy-manual-model">手动填写模型<input aria-label="手动填写模型" placeholder="输入模型 ID，回车使用" defaultValue={selectedModel ?? ""} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { const value = event.currentTarget.value.trim(); if (value) { setSelectedModel(value); setModelMenuOpen(false); } } }}/></label>
-                <button type="button" onClick={() => void loadModels()} disabled={modelsLoading}>刷新模型列表</button>
                 {modelsError && <p>获取模型列表受限：{modelsError}</p>}
               </div>, document.body)}
             </div>

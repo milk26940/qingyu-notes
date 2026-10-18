@@ -63,10 +63,7 @@ export function sanitizePastedHtml(html: string): string {
 }
 
 export function markdownToHtml(text: string): string {
-  // 编辑器尚不支持的扩展语法保留原文，避免解析时吞掉定义或标记。
-  if (/^\s*\[\^[^\]]+\]:|\[\^[^\]]+\]|^\s*\$\$|(?<!\\)\$[^$\n]+\$|^\s*:\s+\S/m.test(text)) return "<p>" + escapeHtml(text).replace(/\n/g, "<br>") + "</p>";
   const source = text
-    .replace(/<!--\s*qingyu-block:([A-Za-z0-9_-]+)\s*-->/g, '<p data-block-id="$1" class="qy-block-anchor"></p>\n\n')
     .replace(/<aside[^>]*>/gi, "> ")
     .replace(/<\/aside>/gi, "")
     .replace(/^---\s*---$/gm, "---");
@@ -88,8 +85,24 @@ export function markdownToHtml(text: string): string {
       : list({ ...token, items })).join("\n");
   };
   renderer.image = (token) => localImageSource(token.href) ? escapeHtml(token.raw) : image(token);
-  renderer.html = (token) => /^<p data-block-id="[A-Za-z0-9_-]+" class="qy-block-anchor"><\/p>/.test(token.text) ? token.text : escapeHtml(token.text);
-  return sanitizePastedHtml(marked.parse(source, { gfm: true, breaks: false, renderer }) as string);
+  renderer.html = (token) => {
+    // 仅在 HTML 标记节点中识别内部定位点，代码块中的同名注释仍保留原文。
+    const anchor = /^<!--\s*(?:qy:block:|qingyu-block:)([A-Za-z0-9_-]+)\s*-->\s*$/.exec(token.text);
+    return anchor ? `<p data-block-id="${anchor[1]}" class="qy-block-anchor"></p>\n` : escapeHtml(token.text);
+  };
+  const tokenizer = new marked.Tokenizer();
+  const definition = tokenizer.def.bind(tokenizer);
+  // 尚不支持的脚注定义按正文保留，不能因此把整页 Markdown 降级为纯文本。
+  tokenizer.def = (source) => /^ {0,3}\[\^/.test(source) ? undefined : definition(source);
+  const html = sanitizePastedHtml(marked.parse(source, { gfm: true, breaks: false, renderer, tokenizer }) as string);
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  // 存储标记跟随所属区块，将定位信息并回正文，避免生成可见的空白段落。
+  for (const anchor of parsed.querySelectorAll(".qy-block-anchor")) {
+    const target = anchor.previousElementSibling ?? anchor.nextElementSibling;
+    if (target && !target.hasAttribute("data-block-id")) target.setAttribute("data-block-id", anchor.getAttribute("data-block-id")!);
+    anchor.remove();
+  }
+  return parsed.body.innerHTML;
 }
 
 export function isLikelyMarkdownPaste(text: string): boolean {

@@ -16,10 +16,10 @@
 
 ## 下载与使用
 
-首个版本：[v0.1.0 下载页](https://github.com/milk26940/qingyu-notes/releases/tag/v0.1.0)。
+当前版本：[v0.2.0 下载页](https://github.com/milk26940/qingyu-notes/releases/tag/v0.2.0)。
 
-- Windows x64 安装包：下载 `Qingyu-v0.1.0-windows-x64-setup.exe` 后运行。
-- 便携版：下载 `Qingyu-v0.1.0-windows-x64-portable.zip`，解压到可写目录后运行 `qingyu-notes.exe`。
+- Windows x64 安装包：下载 `Qingyu-v0.2.0-windows-x64-setup.exe` 后运行。
+- 便携版：下载 `Qingyu-v0.2.0-windows-x64-portable.zip`，解压到可写目录后运行 `Qingyu/qingyu-notes.exe`。
 - 两种版本均需要 WebView2 Runtime，安装包会在缺少时引导安装。
 - 首次使用“小羽”，请在右侧设置中填写自己的 API 地址、API Key 和模型。发行包不附带笔记数据或 API Key。
 - 升级前请备份笔记，保留程序目录中的 `data` 文件夹。
@@ -37,7 +37,7 @@ npm ci
 npm run tauri dev
 ~~~
 
-AI 对话使用嵌入 Rust 后端的 Rig 0.44.0。首次使用时，在 Agent 设置中填写 OpenAI 兼容的 API Base URL、API Key 和模型名；可刷新模型列表或手动指定模型，并检测文字、工具与图片能力。API Key 使用 Windows DPAPI 加密保存在本机，不随笔记或源码导出。
+AI 对话使用嵌入 Rust 后端的 Rig 0.44.0。首次使用时，在 Agent 设置中填写 OpenAI 兼容的 API Base URL 和 API Key，保存并刷新模型列表后选择模型；保存后用于当前对话的后续消息，并作为新对话的默认模型。可检测文字、工具与图片能力。API Key 使用 Windows DPAPI 加密保存在本机，不随笔记或源码导出。
 
 ## 构建与检查
 
@@ -89,4 +89,4 @@ cargo build --manifest-path src-tauri/Cargo.toml --bin qingyu-notes --features t
 
 ## 源码与许可证
 
-本仓库公开源码，项目本身暂未指定开源许可证。随附字体及第三方依赖仍遵循各自许可证，思源黑体许可证见 `public/licenses/LICENSE-SourceHanSansCN.txt`。
+本项目采用 [MIT 许可证](LICENSE)。随附字体及第三方依赖仍遵循各自许可证，思源黑体许可证见 `public/licenses/LICENSE-SourceHanSansCN.txt`。

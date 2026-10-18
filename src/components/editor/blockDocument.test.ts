@@ -71,7 +71,24 @@ describe("区块文档转换", () => {
     const content = documentToEditorContent(document);
     expect(content).toBeTypeOf("string");
     expect(content).toContain('data-block-id="section-1"');
-    expect(content).toContain("<h2>章节</h2>");
+    expect(content).toContain('<h2 data-block-id="section-1">章节</h2>');
+  });
+
+  it("CMake 变量和扩展语法不影响整页 Markdown 渲染", () => {
+    const html = markdownToHtml("# CMake\n<!-- qy:block:section-1 -->\n\n**正文**\n\n```cmake\nset(${TARGET} ${SOURCES})\n```\n\n公式 $a+b$ 和脚注[^1]\n\n[^1]: 保留脚注定义");
+    expect(html).toContain('<h1 data-block-id="section-1">CMake</h1>');
+    expect(html).toContain("<strong>正文</strong>");
+    expect(html).toContain('data-block-id="section-1"');
+    expect(html).not.toContain("&lt;!-- qy:block:");
+    expect(html).toContain("set(${TARGET} ${SOURCES})");
+    expect(html).toContain("[^1]: 保留脚注定义");
+  });
+
+  it("代码示例中的区块注释不会变成定位点", () => {
+    const html = markdownToHtml("```html\n<!-- qy:block:example -->\n<!-- qingyu-block:legacy -->\n```");
+    expect(html).toContain("&lt;!-- qy:block:example --&gt;");
+    expect(html).toContain("&lt;!-- qingyu-block:legacy --&gt;");
+    expect(html).not.toContain("qy-block-anchor");
   });
 
   it("添加选区到对话时附带起止行号", () => {

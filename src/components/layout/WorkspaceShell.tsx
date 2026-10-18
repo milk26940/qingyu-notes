@@ -1,7 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { Sidebar, type SidebarNav } from "./Sidebar";
-import { StatusBar } from "./StatusBar";
 import { Topbar } from "./Topbar";
 import { PanelResizeHandle } from "./PanelResizeHandle";
 import { useViewportWidth } from "./useViewportWidth";
@@ -51,7 +50,7 @@ export function WorkspaceShell({
     rightInline ? `${rightWidth}px` : "0px",
   ].join(" ");
   return (
-    <div className="qy-workspace grid h-screen min-w-0 grid-rows-[56px_minmax(0,1fr)_24px] gap-y-2 overflow-hidden bg-[var(--qy-bg)] px-3 pt-3 text-[var(--qy-ink)]">
+    <div className="qy-workspace grid h-screen min-w-0 grid-rows-[56px_minmax(0,1fr)] gap-y-2 overflow-hidden bg-[var(--qy-bg)] px-3 py-3 text-[var(--qy-ink)]">
       <Topbar
         tabs={tabs}
         activeTabId={activeTabId}
@@ -74,7 +73,6 @@ export function WorkspaceShell({
         {agentDrawer && agentPanelOpen && <button type="button" aria-label="关闭 Agent 抽屉" className="qy-panel-scrim" onClick={() => useWorkspaceStore.getState().toggleAgentPanel()} />}
         {sidebarDrawer && sidebarOpen && (!agentPanelOpen || !agentDrawer) && <div className="qy-panel-scrim" onClick={() => useWorkspaceStore.getState().toggleSidebar()}><div className="qy-sidebar-drawer" style={{ width: Math.min(sidebarWidth, viewportWidth - 32) }} onClick={(event) => event.stopPropagation()}><Sidebar activeNav={activeNav} onNavigate={onNavigate} onOpenPage={onOpenPage} /></div></div>}
       </div>
-      <StatusBar />
     </div>
   );
 }

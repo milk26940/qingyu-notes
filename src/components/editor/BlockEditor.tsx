@@ -354,7 +354,6 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
     {selectionText && <button type="button" className="qy-selection-agent" style={{ top: selectionPosition.top, left: selectionPosition.left }} onMouseDown={(event) => event.preventDefault()} onClick={() => onSelectionAction?.({ id: crypto.randomUUID(), source: "page", text: selectionText, title: document.title, pageId: document.pageId, pageRevision: document.revision, blockIds: selectionRange.blockIds, from: selectionRange.from, to: selectionRange.to })}><MessageSquareQuote size={14}/>添加到对话</button>}
     {menu && !linkMenu && createPortal(<div data-block-menu className="qy-block-menu" role="dialog" aria-label="区块菜单" style={{ position: "fixed", ...menuPosition }} onMouseDown={(event) => event.preventDefault()}>
       <div className="qy-block-menu-title">选择区块类型</div>
-      <div className="qy-block-menu-hint">空行直接转换，有内容时在下方插入</div>
       {items.map(([Icon, label, content]) => <button type="button" key={label} onClick={() => chooseNode(content as Record<string, unknown>)}><Icon size={18}/><span>{label}</span></button>)}
       <button type="button" onClick={() => { fileInsertIndex.current = menuBlockIndex ?? activeBlockIndex; setMenu(false); fileRef.current?.click(); }}><ImagePlus size={18}/><span>图片</span></button>
       <button type="button" onClick={() => { fileInsertIndex.current = menuBlockIndex ?? activeBlockIndex; setMenu(false); fileRef.current?.click(); }}><FileUp size={18}/><span>文件</span></button>

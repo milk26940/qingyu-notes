@@ -87,7 +87,7 @@ export function DocumentOutline({
     >
       <button
         type="button"
-        className="pointer-events-auto absolute right-3 top-3 grid h-9 w-9 place-items-center rounded-xl border border-[var(--qy-border)] bg-white text-[var(--qy-muted)] shadow-md hover:text-[var(--qy-ink)]"
+        className="pointer-events-auto absolute right-3 top-1/2 -translate-y-1/2 grid h-9 w-9 place-items-center rounded-xl border border-[var(--qy-border)] bg-white text-[var(--qy-muted)] shadow-md hover:text-[var(--qy-ink)]"
         title={open ? "收起目录" : "打开目录"}
         aria-label={open ? "收起目录" : "打开目录"}
         aria-expanded={open}
@@ -96,7 +96,7 @@ export function DocumentOutline({
         {open ? <X size={15} /> : <List size={15} />}
       </button>
       {open && (
-        <section className="pointer-events-auto absolute right-3 top-14 flex max-h-[calc(100%-68px)] w-[min(280px,calc(100%-24px))] flex-col overflow-hidden rounded-[18px] border border-[var(--qy-border)] bg-white shadow-[var(--qy-float-shadow)]">
+        <section className="pointer-events-auto absolute right-14 top-1/2 -translate-y-1/2 flex max-h-[calc(100%-24px)] w-[min(280px,calc(100%-68px))] flex-col overflow-hidden rounded-[18px] border border-[var(--qy-border)] bg-white shadow-[var(--qy-float-shadow)]">
           <div className="flex h-9 shrink-0 items-center border-b border-[var(--qy-border)] px-3 text-[12px] font-semibold text-[var(--qy-ink)]">
             文档目录
           </div>
