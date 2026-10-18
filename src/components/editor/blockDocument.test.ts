@@ -1,8 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
+import { generateJSON } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
+import TaskList from "@tiptap/extension-task-list";
+import TaskItem from "@tiptap/extension-task-item";
 import type { PageDocument } from "../../lib/tauri/pages";
-import { documentToEditorContent, documentToTiptap, hydrateEditorContent, selectionWithLines, tiptapToDocument } from "./blockDocument";
+import { documentToEditorContent, documentToTiptap, hydrateEditorContent, markdownToHtml, selectionWithLines, tiptapToDocument } from "./blockDocument";
 
 describe("区块文档转换", () => {
+  it("Markdown 待办生成任务节点并保留完成状态和正文", () => {
+    const html = markdownToHtml("- [x] 已完成\n- [ ] 待处理");
+    const json = generateJSON(html, [StarterKit, TaskList, TaskItem]);
+    expect(json.content?.[0]).toMatchObject({ type: "taskList", content: [
+      { type: "taskItem", attrs: { checked: true }, content: [{ type: "paragraph", content: [{ type: "text", text: "已完成" }] }] },
+      { type: "taskItem", attrs: { checked: false }, content: [{ type: "paragraph", content: [{ type: "text", text: "待处理" }] }] },
+    ] });
+  });
   it("保留稳定区块 ID 和页面链接节点", () => {
     const document: PageDocument = {
       pageId: "page-1",

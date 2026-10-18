@@ -33,6 +33,7 @@ type AppearanceStore = {
   decreaseFont: () => void;
   resetFont: () => void;
   applyFontScale: () => void;
+  setFontScale: (value: number) => void;
 };
 
 export const useAppearanceStore = create<AppearanceStore>((set, get) => {
@@ -43,6 +44,7 @@ export const useAppearanceStore = create<AppearanceStore>((set, get) => {
 
   return {
     fontScale: DEFAULT_SCALE,
+    setFontScale: (value) => set({ fontScale: syncFontScale(value) }),
     increaseFont: () => update("increase"),
     decreaseFont: () => update("decrease"),
     resetFont: () => update("reset"),

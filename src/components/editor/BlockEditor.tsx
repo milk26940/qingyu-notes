@@ -1,4 +1,5 @@
-import { Extension } from "@tiptap/core";
+import { Extension, generateJSON } from "@tiptap/core";
+import { Fragment, Slice, type Node as ProseMirrorNode } from "@tiptap/pm/model";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
@@ -12,17 +13,26 @@ import Underline from "@tiptap/extension-underline";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Braces, CheckSquare, ChevronDown, Code2, Database, FilePlus2, FileUp, Heading1, Heading2, Heading3, Heading4, ImagePlus, Link2, List, ListOrdered, MessageSquareQuote, Minus, Plus, Table2, Text, TextQuote } from "lucide-react";
+import { Braces, CheckSquare, Code2, Database, FilePlus2, FileUp, Heading1, Heading2, Heading3, Heading4, ImagePlus, Link2, List, ListOrdered, MessageSquareQuote, Minus, Plus, Table2, Text, TextQuote } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { type PageDocument, type PageKind, type PageSummary } from "../../lib/tauri/pages";
+import { type ContextReference } from "../../lib/tauri/conversations";
+import { type Page, type PageDocument, type PageKind, type PageSummary } from "../../lib/tauri/pages";
 import { parseQingyuPageLink } from "../../lib/internalLinks";
-import { documentToEditorContent, hydrateEditorContent, selectionWithLines, tiptapToDocument } from "./blockDocument";
+import { clipboardContainsRichText, freshPastedBlocks, documentToEditorContent, hydrateEditorContent, isLikelyMarkdownPaste, markdownToHtml, rawHtmlSourceFromClipboard, sanitizePastedHtml, tiptapToDocument } from "./blockDocument";
 import { QingyuCodeBlock } from "./CodeBlockNode";
 import { storeEditorAttachment } from "./imageAttachments";
 import { createPortal } from "react-dom";
 import { useBlockHover } from "./useBlockHover";
 
-const editorPositions = new Map<string, { from: number; to: number; scrollTop: number }>();
+import { useSessionStore } from "../../stores/sessionStore";
+import { usePagesStore } from "../../stores/pagesStore";
+
+function emptyBlock(node: ProseMirrorNode) {
+  if (node.isAtom || node.type.name === "table" || node.textContent.trim()) return false;
+  let empty = true;
+  node.descendants((child) => { if (child.isAtom && !child.isText && child.type.name !== "hardBreak") empty = false; });
+  return empty;
+}
 
 const BlockIdentity = Extension.create({
   name: "blockIdentity",
@@ -41,14 +51,15 @@ type Props = {
   readOnly?: boolean;
   onChange: (document: PageDocument) => void;
   onOpenPage?: (id: string, blockId?: string | null) => void;
-  onCreateChild?: (kind: "page" | "database", position: number) => void | Promise<void>;
-  onSelectionAction?: (text: string) => void;
+  onCreateChild?: (kind: "page" | "database") => Promise<Page | null>;
+  onSelectionAction?: (reference: ContextReference) => void;
   pageKind?: PageKind;
 };
 
 export const BlockEditor = memo(function BlockEditor({ document, pages, targetBlockId, readOnly = false, onChange, onOpenPage, onCreateChild, onSelectionAction, pageKind = "page" }: Props) {
   const documentRef = useRef(document);
   const fileRef = useRef<HTMLInputElement>(null);
+  const plainPasteRef = useRef(false);
   const uploadRef = useRef<(files: File[]) => Promise<void>>(async () => undefined);
   const [menu, setMenu] = useState(false);
   const [linkMenu, setLinkMenu] = useState(false);
@@ -57,7 +68,7 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
   const localBlocks = useRef<PageDocument["blocks"] | null>(null);
   const [menuBlockIndex, setMenuBlockIndex] = useState<number | null>(null);
   const [selectionText, setSelectionText] = useState("");
-  const [selectionLines, setSelectionLines] = useState({ start: 1, end: 1 });
+  const [selectionRange, setSelectionRange] = useState({ from: 0, to: 0, blockIds: [] as string[] });
   const [selectionPosition, setSelectionPosition] = useState({ top: 0, left: 0 });
   const shellRef = useRef<HTMLDivElement>(null);
   documentRef.current = document;
@@ -75,6 +86,10 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
     editable: !readOnly,
     editorProps: {
       attributes: { class: "qy-block-editor", spellcheck: "true" },
+      handleKeyDown(_view, event) {
+        plainPasteRef.current = (event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "v";
+        return false;
+      },
       handleClick(_view, _pos, event) {
         const anchor = (event.target as HTMLElement).closest("a") as HTMLAnchorElement | null;
         if (!anchor) return false;
@@ -84,11 +99,42 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
         else if (/^(https?:|mailto:)/i.test(anchor.href)) void openUrl(anchor.href);
         return true;
       },
-      handlePaste(_view, event) {
+      transformPastedHTML(html) {
+        return sanitizePastedHtml(html).replace(/\sdata-block-id=(?:"[^"]*"|'[^']*')/gi, () => ' data-block-id="' + crypto.randomUUID() + '"');
+      },
+      handlePaste(view, event) {
+        const plainPaste = plainPasteRef.current;
+        plainPasteRef.current = false;
+        const text = event.clipboardData?.getData("text/plain") ?? "";
+        if (view.state.selection.$from.parent.type.name === "codeBlock") {
+          event.preventDefault();
+          view.dispatch(view.state.tr.insertText(text.replace(/\r\n?/g, "\n")).scrollIntoView());
+          return true;
+        }
         const files = Array.from(event.clipboardData?.files ?? []);
-        if (!files.length) return false;
+        if (files.length) {
+          event.preventDefault();
+          void uploadRef.current(files);
+          return true;
+        }
+        if (plainPaste) {
+          event.preventDefault();
+          const lines = text.replace(/\r\n?/g, "\n").split("\n");
+          if (lines.length === 1) view.dispatch(view.state.tr.insertText(text).scrollIntoView());
+          else {
+            const nodes = lines.map((line) => view.state.schema.nodes.paragraph.create(null, line ? view.state.schema.text(line) : undefined));
+            view.dispatch(view.state.tr.replaceSelection(Slice.maxOpen(Fragment.fromArray(nodes))).scrollIntoView());
+          }
+          return true;
+        }
+        const clipboardHtml = event.clipboardData?.getData("text/html") ?? "";
+        if (clipboardContainsRichText(text, clipboardHtml)) return false;
+        const rawHtml = rawHtmlSourceFromClipboard(text, clipboardHtml);
+        if (!rawHtml && !isLikelyMarkdownPaste(text)) return false;
         event.preventDefault();
-        void uploadRef.current(files);
+        const html = rawHtml ? sanitizePastedHtml(rawHtml) : markdownToHtml(text);
+        const parsed = freshPastedBlocks(generateJSON(html, extensions));
+        editor?.chain().focus(undefined, { scrollIntoView: false }).insertContent(parsed.content ?? []).scrollIntoView().run();
         return true;
       },
       handleDrop(_view, event) {
@@ -103,10 +149,13 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
     onSelectionUpdate({ editor: current }) {
       const { from, to, empty } = current.state.selection;
       const text = empty ? "" : current.state.doc.textBetween(from, to, "\n", "\n");
-      const before = current.state.doc.textBetween(0, from, "\n", "\n");
-      const start = before ? before.split("\n").length : 1;
       setSelectionText(text);
-      setSelectionLines({ start, end: start + Math.max(0, text.split("\n").length - 1) });
+      const blockIds = new Set<string>();
+      if (!empty) current.state.doc.nodesBetween(from, to, (node) => {
+        const blockId = typeof node.attrs?.blockId === "string" ? node.attrs.blockId : "";
+        if (blockId) blockIds.add(blockId);
+      });
+      setSelectionRange({ from, to, blockIds: [...blockIds] });
       if (!empty && shellRef.current) {
         const nativeSelection = window.getSelection();
         const range = nativeSelection?.rangeCount ? nativeSelection.getRangeAt(0) : null;
@@ -123,21 +172,37 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
   });
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
+    if (!selectionText) return;
+    const position = () => {
+      if (editor.isDestroyed || !shellRef.current) return;
+      const start = editor.view.coordsAtPos(editor.state.selection.from);
+      const shell = shellRef.current.getBoundingClientRect();
+      setSelectionPosition({ top: Math.max(4, start.top - shell.top - 44), left: Math.max(0, Math.min(start.left - shell.left, shell.width - 140)) });
+    };
+    position();
+    window.addEventListener("scroll", position, true);
+    window.addEventListener("resize", position);
+    const observer = new ResizeObserver(position); observer.observe(editor.view.dom);
+    return () => { window.removeEventListener("scroll", position, true); window.removeEventListener("resize", position); observer.disconnect(); };
+  }, [editor, selectionText, selectionRange.from, selectionRange.to]);
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return;
     let disposed = false;
     const pageId = document.pageId;
     const scroller = shellRef.current?.closest<HTMLElement>(".qy-page-scroll");
-    const savedPosition = editorPositions.get(pageId);
+    const sessionVault = useSessionStore.getState().vault;
+    const savedPosition = useSessionStore.getState().positions[pageId];
     const content = documentToEditorContent(document, extensions);
     const restorePosition = () => {
       if (!savedPosition || targetBlockId) return;
       const size = editor.state.doc.content.size;
-      editor.commands.setTextSelection({ from: Math.min(savedPosition.from, size), to: Math.min(savedPosition.to, size) });
+      editor.commands.setTextSelection({ from: Math.max(1, Math.min(savedPosition.from, size)), to: Math.max(1, Math.min(savedPosition.to, size)) });
       if (scroller) scroller.scrollTop = savedPosition.scrollTop;
     };
     // 本地保存只更新版本号，不替换仍在编辑的 DOM 和选区。
     const localSave = localBlocks.current !== null && JSON.stringify(localBlocks.current) === JSON.stringify(document.blocks);
     if (!localSave) editor.commands.setContent(content, { emitUpdate: false });
-    restorePosition();
+    if (!localSave) restorePosition();
     const baseline = editor.state.doc;
     if (!localSave) void hydrateEditorContent(content).then((hydrated) => {
       if (disposed || editor.isDestroyed || documentRef.current.pageId !== pageId || editor.state.doc !== baseline) return;
@@ -146,14 +211,22 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
     }).catch(() => undefined);
     return () => {
       disposed = true;
-      if (!editor.isDestroyed) {
+      if (!editor.isDestroyed && useSessionStore.getState().vault === sessionVault) {
         const { from, to } = editor.state.selection;
-        editorPositions.delete(pageId);
-        editorPositions.set(pageId, { from, to, scrollTop: scroller?.scrollTop ?? 0 });
-        if (editorPositions.size > 50) editorPositions.delete(editorPositions.keys().next().value!);
+        useSessionStore.getState().rememberPosition(pageId, { from, to, scrollTop: scroller?.scrollTop ?? 0 });
       }
     };
   }, [document.pageId, document.revision, editor]);
+  useEffect(() => {
+    if (!editor) return;
+    const scroller = shellRef.current?.closest<HTMLElement>(".qy-page-scroll");
+    const sessionVault = useSessionStore.getState().vault;
+    const remember = () => { if (!editor.isDestroyed && useSessionStore.getState().vault === sessionVault) { const { from, to } = editor.state.selection; useSessionStore.getState().rememberPosition(document.pageId, { from, to, scrollTop: scroller?.scrollTop ?? 0 }); } };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => { clearTimeout(timer); timer = setTimeout(remember, 150); };
+    editor.on("selectionUpdate", schedule); scroller?.addEventListener("scroll", schedule); window.addEventListener("qingyu:remember-position", remember);
+    return () => { clearTimeout(timer); remember(); editor.off("selectionUpdate", schedule); scroller?.removeEventListener("scroll", schedule); window.removeEventListener("qingyu:remember-position", remember); };
+  }, [editor, document.pageId]);
   useEffect(() => {
     if (!editor || !targetBlockId) return;
     const frame = window.requestAnimationFrame(() => {
@@ -173,7 +246,6 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
   }, []);
   const hover = useBlockHover(shellRef, editor, menu || linkMenu);
   const activeBlockIndex = hover.index;
-  const activeBlockType = hover.type;
   const addTop = hover.top;
   const hoverVisible = hover.visible;
   useEffect(() => {
@@ -191,31 +263,29 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
   }, [editor, readOnly]);
   if (!editor) return null;
   const upload = async (files: File[]) => {
-    for (const file of files) {
-      const attachment = await storeEditorAttachment(document.pageId, file);
-      let position: number | null = null;
-      if (fileInsertIndex.current !== null) {
-        position = 0;
-        for (let i = 0; i < Math.min(fileInsertIndex.current + 1, editor.state.doc.childCount); i++) position += editor.state.doc.child(i).nodeSize;
-      }
-      if (attachment.image) {
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(file);
-        });
-        const node = { type: "image", attrs: { src: dataUrl, alt: attachment.name, title: attachment.path } };
-        if (position !== null) editor.chain().focus(undefined, { scrollIntoView: false }).insertContentAt(position, node).scrollIntoView().run();
-        else editor.chain().focus().setImage(node.attrs).run();
-      } else {
-        const link = { type: "text", text: attachment.name, marks: [{ type: "link", attrs: { href: attachment.path } }, { type: "bold" }] };
-        if (position !== null) editor.chain().focus(undefined, { scrollIntoView: false }).insertContentAt(position, { type: "paragraph", content: [link] }).scrollIntoView().run();
-        else editor.chain().focus().insertContent(link).run();
-      }
-      if (fileInsertIndex.current !== null) fileInsertIndex.current++;
-    }
+    const targetIndex = fileInsertIndex.current;
     fileInsertIndex.current = null;
+    const nodes: Record<string, unknown>[] = [];
+    try {
+      for (const file of files) {
+        const attachment = await storeEditorAttachment(document.pageId, file);
+        if (attachment.image) {
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsDataURL(file);
+          });
+          nodes.push({ type: "image", attrs: { src: dataUrl, alt: attachment.name, title: attachment.path } });
+        } else nodes.push({ type: "paragraph", content: [{ type: "text", text: attachment.name, marks: [{ type: "link", attrs: { href: attachment.path } }, { type: "bold" }] }] });
+      }
+      if (editor.isDestroyed || !nodes.length) return;
+      const chain = editor.chain().focus(undefined, { scrollIntoView: false });
+      if (targetIndex !== null && targetIndex < editor.state.doc.childCount) {
+        let position = 0;
+        for (let i = 0; i < targetIndex; i++) position += editor.state.doc.child(i).nodeSize;
+        const target = editor.state.doc.child(targetIndex);
+        const at = emptyBlock(target) ? { from: position, to: position + target.nodeSize } : position + target.nodeSize;
+        chain.insertContentAt(at, nodes).scrollIntoView().run();
+      } else chain.insertContent(nodes).scrollIntoView().run();
+    } catch (error) { usePagesStore.getState().reportError(String(error)); }
   };
   uploadRef.current = upload;
   const openBlockMenu = (index: number, top: number) => {
@@ -243,77 +313,56 @@ export const BlockEditor = memo(function BlockEditor({ document, pages, targetBl
     setMenu(false);
     setMenuBlockIndex(null);
   };
-  const choose = (action: (chain: ReturnType<typeof editor.chain>) => ReturnType<typeof editor.chain> | void) => {
-    const target = menuBlockIndex ?? activeBlockIndex;
-    const parent = editor.state.doc;
-    if (target >= parent.childCount) {
-      setMenu(false);
-      setMenuBlockIndex(null);
-      return;
-    }
-    let startPos = 0;
-    for (let i = 0; i < target; i++) {
-      startPos += parent.child(i).nodeSize;
-    }
-    const node = parent.child(target);
-    const from = Math.min(startPos + 1, editor.state.doc.content.size);
-    const to = Math.min(startPos + node.nodeSize - 1, editor.state.doc.content.size);
-
-    const chain = editor.chain().focus(undefined, { scrollIntoView: false }).setTextSelection({ from, to });
-    action(chain);
-    chain.scrollIntoView().run();
-
-    setMenu(false);
-    setLinkMenu(false);
-    setMenuBlockIndex(null);
+  const chooseNode = (content: Record<string, unknown>) => {
+    const index = menuBlockIndex ?? activeBlockIndex;
+    const node = editor.state.doc.child(index);
+    if (emptyBlock(node)) {
+      let position = 0;
+      for (let i = 0; i < index; i++) position += editor.state.doc.child(i).nodeSize;
+      editor.chain().focus(undefined, { scrollIntoView: false }).insertContentAt({ from: position, to: position + node.nodeSize }, content).scrollIntoView().run();
+      setMenu(false); setLinkMenu(false); setMenuBlockIndex(null);
+    } else insertAfter(content);
   };
+  const createChild = async (kind: "page" | "database") => {
+    setMenu(false);
+    const child = await onCreateChild?.(kind);
+    if (!child || editor.isDestroyed) return;
+    chooseNode({ type: "paragraph", content: [{ type: "text", text: child.title, marks: [{ type: "link", attrs: { href: `qingyu://page/${child.id}` } }, { type: "bold" }] }] });
+  };
+  const paragraph = { type: "paragraph" };
   const items = [
-    [Text, "文本", (c: ReturnType<typeof editor.chain>) => c.setParagraph()],
-    [Heading1, "标题 1", (c: ReturnType<typeof editor.chain>) => c.setHeading({ level: 1 })],
-    [Heading2, "标题 2", (c: ReturnType<typeof editor.chain>) => c.setHeading({ level: 2 })],
-    [Heading3, "标题 3", (c: ReturnType<typeof editor.chain>) => c.setHeading({ level: 3 })],
-    [Heading4, "标题 4", (c: ReturnType<typeof editor.chain>) => c.setHeading({ level: 4 })],
-    [List, "项目符号列表", (c: ReturnType<typeof editor.chain>) => c.toggleBulletList()],
-    [ListOrdered, "有序列表", (c: ReturnType<typeof editor.chain>) => c.toggleOrderedList()],
-    [CheckSquare, "待办事项", (c: ReturnType<typeof editor.chain>) => c.toggleTaskList()],
-    [ChevronDown, "折叠列表", (c: ReturnType<typeof editor.chain>) => c.toggleBulletList()],
-    [MessageSquareQuote, "标注", (c: ReturnType<typeof editor.chain>) => c.toggleBlockquote()],
-    [TextQuote, "引用", (c: ReturnType<typeof editor.chain>) => c.toggleBlockquote()],
-    [Table2, "表格", (c: ReturnType<typeof editor.chain>) => c.insertTable({ rows: 3, cols: 3, withHeaderRow: true })],
-    [Minus, "分隔线", (c: ReturnType<typeof editor.chain>) => c.setHorizontalRule()],
-    [Code2, "代码", (c: ReturnType<typeof editor.chain>) => c.toggleCodeBlock()],
-    [Braces, "Mermaid", (c: ReturnType<typeof editor.chain>) => c.setCodeBlock().updateAttributes("codeBlock", { language: "mermaid" })],
-    [ImagePlus, "图片", () => fileRef.current?.click()],
-    [FileUp, "文件", () => fileRef.current?.click()],
+    [Text, "正文", paragraph],
+    [Heading1, "标题 1", { type: "heading", attrs: { level: 1 } }],
+    [Heading2, "标题 2", { type: "heading", attrs: { level: 2 } }],
+    [Heading3, "标题 3", { type: "heading", attrs: { level: 3 } }],
+    [Heading4, "标题 4", { type: "heading", attrs: { level: 4 } }],
+    [List, "项目符号列表", { type: "bulletList", content: [{ type: "listItem", content: [paragraph] }] }],
+    [ListOrdered, "有序列表", { type: "orderedList", content: [{ type: "listItem", content: [paragraph] }] }],
+    [CheckSquare, "待办事项", { type: "taskList", content: [{ type: "taskItem", attrs: { checked: false }, content: [paragraph] }] }],
+    [TextQuote, "引用", { type: "blockquote", content: [paragraph] }],
+    [Table2, "表格", { type: "table", content: [
+      { type: "tableRow", content: Array.from({ length: 3 }, () => ({ type: "tableHeader", content: [paragraph] })) },
+      { type: "tableRow", content: Array.from({ length: 3 }, () => ({ type: "tableCell", content: [paragraph] })) },
+    ] }],
+    [Minus, "分隔线", { type: "horizontalRule" }],
+    [Code2, "代码", { type: "codeBlock", attrs: { language: null } }],
+    [Braces, "Mermaid", { type: "codeBlock", attrs: { language: "mermaid" } }],
   ] as const;
   return <div ref={shellRef} className="qy-block-editor-shell" onMouseMove={hover.onMouseMove} onMouseLeave={hover.onMouseLeave} onContextMenu={(event) => { const target = event.target as HTMLElement; if (target.closest("p")?.textContent?.trim() === "") { event.preventDefault(); openBlockMenu(activeBlockIndex, addTop); } }} onPointerDown={(event) => { const target = event.target as HTMLElement; if (target.closest("[data-block-menu], .qy-block-add")) return; setMenu(false); setLinkMenu(false); }}>
     <input ref={fileRef} type="file" multiple className="hidden" aria-label="选择图片或附件" accept="image/*,.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.md,.txt,.csv,.json,.zip,.7z,.rar" onChange={(event) => { const files = Array.from(event.currentTarget.files ?? []); event.currentTarget.value = ""; void upload(files); }}/>
     {!readOnly && (hoverVisible || menu) && <button type="button" className="qy-block-add" style={{ top: addTop }} aria-label="添加区块" onPointerDownCapture={(event) => { event.preventDefault(); event.stopPropagation(); openBlockMenu(activeBlockIndex, addTop); }} onClick={(event) => { event.preventDefault(); event.stopPropagation(); openBlockMenu(activeBlockIndex, addTop); }}><Plus size={17}/></button>}
-    {selectionText && <button type="button" className="qy-selection-agent" style={{ top: selectionPosition.top, left: selectionPosition.left }} onMouseDown={(event) => event.preventDefault()} onClick={() => onSelectionAction?.(selectionWithLines("\n".repeat(selectionLines.start - 1), selectionText))}><MessageSquareQuote size={14}/>添加到对话</button>}
+    {selectionText && <button type="button" className="qy-selection-agent" style={{ top: selectionPosition.top, left: selectionPosition.left }} onMouseDown={(event) => event.preventDefault()} onClick={() => onSelectionAction?.({ id: crypto.randomUUID(), source: "page", text: selectionText, title: document.title, pageId: document.pageId, pageRevision: document.revision, blockIds: selectionRange.blockIds, from: selectionRange.from, to: selectionRange.to })}><MessageSquareQuote size={14}/>添加到对话</button>}
     {menu && !linkMenu && createPortal(<div data-block-menu className="qy-block-menu" role="dialog" aria-label="区块菜单" style={{ position: "fixed", ...menuPosition }} onMouseDown={(event) => event.preventDefault()}>
-      <div className="qy-block-menu-title">转换当前区块 · {activeBlockType === "heading" ? "标题" : "正文"}</div>
-      {items.map(([Icon, label, run]) => <button type="button" key={label} onClick={() => choose(run)}><Icon size={18}/><span>{label}</span></button>)}
-      <div className="qy-block-menu-title">在当前行下方插入</div>
-      <button type="button" onClick={() => insertAfter({ type: "paragraph" })}><Text size={18}/><span>空白正文</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "heading", attrs: { level: 1 } })}><Heading1 size={18}/><span>标题 1</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "heading", attrs: { level: 2 } })}><Heading2 size={18}/><span>标题 2</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "heading", attrs: { level: 3 } })}><Heading3 size={18}/><span>标题 3</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "heading", attrs: { level: 4 } })}><Heading4 size={18}/><span>标题 4</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "bulletList", content: [{ type: "listItem", content: [{ type: "paragraph" }] }] })}><List size={18}/><span>项目符号列表</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "orderedList", content: [{ type: "listItem", content: [{ type: "paragraph" }] }] })}><ListOrdered size={18}/><span>有序列表</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "taskList", content: [{ type: "taskItem", attrs: { checked: false }, content: [{ type: "paragraph" }] }] })}><CheckSquare size={18}/><span>待办事项</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "blockquote", content: [{ type: "paragraph" }] })}><TextQuote size={18}/><span>引用</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "table", content: [{ type: "tableRow", content: [{ type: "tableHeader", content: [{ type: "paragraph" }] }, { type: "tableHeader", content: [{ type: "paragraph" }] }, { type: "tableHeader", content: [{ type: "paragraph" }] }] }, { type: "tableRow", content: [{ type: "tableCell", content: [{ type: "paragraph" }] }, { type: "tableCell", content: [{ type: "paragraph" }] }, { type: "tableCell", content: [{ type: "paragraph" }] }] }] })}><Table2 size={18}/><span>表格</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "horizontalRule" })}><Minus size={18}/><span>分隔线</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "codeBlock", attrs: { language: null } })}><Code2 size={18}/><span>代码</span></button>
-      <button type="button" onClick={() => insertAfter({ type: "codeBlock", attrs: { language: "mermaid" } })}><Braces size={18}/><span>Mermaid</span></button>
+      <div className="qy-block-menu-title">选择区块类型</div>
+      <div className="qy-block-menu-hint">空行直接转换，有内容时在下方插入</div>
+      {items.map(([Icon, label, content]) => <button type="button" key={label} onClick={() => chooseNode(content as Record<string, unknown>)}><Icon size={18}/><span>{label}</span></button>)}
       <button type="button" onClick={() => { fileInsertIndex.current = menuBlockIndex ?? activeBlockIndex; setMenu(false); fileRef.current?.click(); }}><ImagePlus size={18}/><span>图片</span></button>
       <button type="button" onClick={() => { fileInsertIndex.current = menuBlockIndex ?? activeBlockIndex; setMenu(false); fileRef.current?.click(); }}><FileUp size={18}/><span>文件</span></button>
-      <button type="button" onClick={() => { setMenu(false); void onCreateChild?.("page", (menuBlockIndex ?? activeBlockIndex) + 1); }}><FilePlus2 size={18}/><span>页面</span></button>
-      {pageKind !== "database" && <button type="button" onClick={() => { setMenu(false); void onCreateChild?.("database", (menuBlockIndex ?? activeBlockIndex) + 1); }}><Database size={18}/><span>数据库</span></button>}
+      <button type="button" onClick={() => void createChild("page")}><FilePlus2 size={18}/><span>页面</span></button>
+      {pageKind !== "database" && <button type="button" onClick={() => void createChild("database")}><Database size={18}/><span>数据库</span></button>}
       <button type="button" onClick={() => setLinkMenu(true)}><Link2 size={18}/><span>链接到页面</span></button>
     </div>, window.document.body)}
-    {linkMenu && createPortal(<div data-block-menu className="qy-page-link-menu" style={{ position: "fixed", ...menuPosition }} onMouseDown={(event) => event.preventDefault()}>{pages.map((page) => <button key={page.id} type="button" onClick={() => choose((c) => c.insertContent({ type: "text", text: page.title, marks: [{ type: "link", attrs: { href: `qingyu://page/${page.id}` } }, { type: "bold" }] }))}>{page.title}</button>)}</div>, window.document.body)}
+    {linkMenu && createPortal(<div data-block-menu className="qy-page-link-menu" style={{ position: "fixed", ...menuPosition }} onMouseDown={(event) => event.preventDefault()}>{pages.map((page) => <button key={page.id} type="button" onClick={() => { chooseNode({ type: "paragraph", content: [{ type: "text", text: page.title, marks: [{ type: "link", attrs: { href: `qingyu://page/${page.id}` } }] }] }); setLinkMenu(false); }}>{page.title}</button>)}</div>, window.document.body)}
     <EditorContent editor={editor}/>
   </div>;
 });

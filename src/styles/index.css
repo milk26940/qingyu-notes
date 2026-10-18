@@ -1,5 +1,22 @@
 @import "tailwindcss";
 
+.qy-tree-node, .qy-tree-row { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.qy-tree-row > svg { flex-shrink: 0; }
+.qy-tree-row > button:first-child, .qy-tree-row button > svg { flex-shrink: 0; }
+.qy-tree-row > button:nth-child(2) { flex-shrink: 1; }
+.qy-tab-title { border-radius: 0 !important; overflow: hidden; padding: 5px 8px; }
+.qy-tab-close { border-radius: 6px; }
+.qy-tree-copy-notice { position: fixed; bottom: 46px; left: 20px; z-index: 160; padding: 8px 14px; border: 1px solid var(--qy-border); border-radius: 10px; background: var(--qy-panel, #fff); box-shadow: var(--qy-float-shadow); font-size: 12px; animation: qy-copy-notice 2s both; }
+@keyframes qy-copy-notice { 0%, 85% { opacity: 1; } 100% { opacity: 0; } }
+.qy-agent-settings-refresh { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 14px; border: 1px solid var(--qy-border) !important; border-radius: 9px; background: var(--qy-hover, #f1f2f4) !important; color: var(--qy-ink) !important; font-weight: 600; }
+.qy-agent-settings details { margin: 12px 0; font-size: 12px; overflow-wrap: anywhere; }
+.qy-agent-settings details summary { cursor: pointer; color: var(--qy-muted); }
+.qy-agent-settings details output { display: block; margin: 6px 0 12px; user-select: text; }
+.qy-agent-history-row { display: flex; align-items: center; gap: 4px; }
+.qy-agent-history-row > button:first-child { flex: 1; min-width: 0; }
+.qy-agent-history-row > button:last-child { flex-shrink: 0; width: 28px; padding: 5px; }
+
+
 @font-face {
   font-family: "Qingyu Source Han Sans";
   src: url("../assets/fonts/SourceHanSansCN-Regular.woff2") format("woff2");
@@ -210,7 +227,31 @@ button:focus-visible, [role="button"]:focus-visible, summary:focus-visible, [rol
 .qy-agent-slot > * { width: 100%; height: 100%; }
 
 /* 对话按轮次连续排列，工具详情与修改记录只归属当前轮。 */
-.agent-panel { position: relative; background: #fafafa; }
+.agent-panel { position: relative; background: #fafbfe; }
+.qy-agent-header { min-height: 48px; flex-shrink: 0; background: #ffffffb8; }
+.qy-agent-header > div:first-child { flex: 1; }
+.qy-agent-header > div:last-child { flex-shrink: 0; }
+.qy-agent-avatar { display: block; width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; object-fit: cover; background: #eaf2ff; border: 1px solid #dbe7fa; }
+.qy-agent-welcome { min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 6px 36px; text-align: center; }
+.qy-agent-mascot { width: auto; height: clamp(130px, 25vh, 210px); max-width: 100%; object-fit: contain; margin-bottom: 10px; filter: drop-shadow(0 7px 12px #5175b315); user-select: none; }
+.qy-agent-welcome h2 { margin: 0; font-size: 19px; font-weight: 600; color: #2d4160; letter-spacing: .02em; }
+.qy-agent-welcome-description { margin: 8px 0 14px; font-size: 13px; line-height: 1.6; color: #68768c; }
+.qy-agent-scope { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 10px; border: 1px solid #e5ebf4; border-radius: 20px; color: #6a7890; font-size: 11px; overflow-wrap: anywhere; }
+.qy-agent-scope > span { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; background: #79a89b; }
+.qy-agent-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; margin-top: 23px; }
+.qy-agent-suggestions button { display: flex; align-items: center; gap: 10px; padding: 8px 11px; border: 1px solid #dde6f3; border-radius: 10px; background: #fff; color: #526886; font-size: 12px; }
+.qy-agent-suggestions button:hover { background: #edf4ff; border-color: #b9cef0; }
+.qy-agent-suggestions button span { color: #8fa7ca; }
+.qy-assistant-identity { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; font-size: 12px; font-weight: 600; color: #657b9b; }
+.qy-assistant-identity .qy-agent-avatar { width: 25px; height: 25px; }
+.qy-assistant-identity small { color: #8290a4; font-size: 11px; font-weight: 400; }
+.agent-panel [data-agent-viewport] { scrollbar-width: thin; scrollbar-color: #c8d3e2 transparent; }
+.agent-panel [data-agent-viewport]::-webkit-scrollbar { width: 5px; }
+.agent-panel [data-agent-viewport]::-webkit-scrollbar-thumb { border-radius: 8px; background: #c8d3e2; }
+.agent-panel .agent-input { box-shadow: 0 3px 14px #6080b20a; }
+.agent-panel .agent-input:focus-within { border-color: #a9c4ef; box-shadow: 0 0 0 3px #4c87df0b; }
+.qy-agent-settings select { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid var(--qy-border); border-radius: 8px; background: var(--qy-bg); font-size: 13px; }
+.qy-agent-settings label small { font-size: 11px; color: #6a7890; }
 .qy-conversation-log { min-width: 0; padding: 0 3px 12px; }
 .qy-conversation-turn { min-width: 0; padding: 18px 0 24px; }
 .qy-conversation-turn + .qy-conversation-turn { border-top: 1px solid #e9eaed; }
@@ -306,3 +347,27 @@ button:focus-visible, [role="button"]:focus-visible, summary:focus-visible, [rol
 .qy-change-columns section:last-child pre { background: #f5fbf7; }
 .qy-change-legacy > p { padding: 10px 16px; color: #6b7480; font-size: 13px; }
 @media (max-width: 1000px) { .qy-change-columns { grid-template-columns: minmax(0,1fr); } .qy-change-columns section + section { border-left: 0; border-top: 1px solid #e4e7ec; } }
+.qy-reference-list { display: grid; gap: 6px; margin: 6px 0 10px; }
+.qy-reference-clear { justify-self: end; color: var(--qy-muted); font-size: 11px; }
+.qy-reference-card { min-width: 0; border: 1px solid var(--qy-border); border-radius: 9px; background: var(--qy-bg); padding: 7px 9px; font-size: 12px; }
+.qy-reference-card summary { cursor: pointer; overflow-wrap: anywhere; color: var(--qy-muted); }
+.qy-reference-excerpt { display: block; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--qy-faint); font-size: 11px; }
+.qy-reference-card pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding-top: 6px; line-height: 1.6; font-family: inherit; }
+.qy-reference-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 5px; color: var(--qy-accent); font-size: 11px; }
+.qy-message-quote { position: fixed; z-index: 120; display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border: 1px solid var(--qy-border); border-radius: 8px; background: white; color: var(--qy-ink); box-shadow: var(--qy-float-shadow); font-size: 12px; }
+.qy-agent-settings { width: min(510px, 100%); max-height: 90vh; overflow: auto; padding: 20px; border-radius: 18px; background: white; box-shadow: var(--qy-float-shadow); font-size: 13px; }
+.qy-agent-settings header { display: flex; align-items: center; justify-content: space-between; font-size: 15px; }
+.qy-agent-settings > p { margin: 12px 0; color: var(--qy-muted); }
+.qy-agent-settings fieldset { display: grid; gap: 13px; }
+.qy-agent-settings label { display: grid; gap: 6px; }
+.qy-agent-settings label > input:not([type=checkbox]), .qy-manual-model input { width: 100%; padding: 8px 10px; border: 1px solid var(--qy-border); border-radius: 8px; background: var(--qy-bg); font-size: 13px; }
+.qy-agent-settings .qy-agent-key-clear { display: flex; align-items: center; gap: 7px; color: var(--qy-muted); }
+.qy-agent-settings-refresh { justify-self: start; color: var(--qy-accent); }
+.qy-agent-settings output { overflow-wrap: anywhere; color: var(--qy-muted); font-size: 12px; }
+.qy-agent-settings .qy-agent-settings-error { color: #c43f3f; }
+.qy-agent-settings footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.qy-agent-settings footer button { padding: 7px 10px; border-radius: 8px; background: var(--qy-bg); }
+.qy-agent-settings footer button:last-child { color: white; background: var(--qy-accent); }
+.qy-agent-settings button:disabled { opacity: .5; }
+.qy-agent-capabilities { margin-top: 12px; padding: 10px; border: 1px solid var(--qy-border); border-radius: 8px; line-height: 1.7; }
+.qy-manual-model { display: grid; gap: 5px; padding: 8px 10px; font-size: 12px; color: var(--qy-muted); }

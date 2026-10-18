@@ -57,6 +57,26 @@ pub struct ConversationAttachment {
     pub relative_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextReference {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub text: String,
+    pub page_id: Option<String>,
+    pub page_revision: Option<i64>,
+    pub block_ids: Option<Vec<String>>,
+    pub conversation_id: Option<String>,
+    pub message_id: Option<String>,
+    pub from: Option<usize>,
+    pub to: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextPage { pub id: String, pub title: String }
+
 #[derive(Debug, Clone)]
 pub struct ConversationStore {
     root: PathBuf,
@@ -111,6 +131,38 @@ impl ConversationStore {
         Ok(metadata)
     }
 
+    pub fn delete(&self, id: &str) -> Result<(), AppError> {
+        Uuid::parse_str(id).map_err(|_| AppError::new("conversation_invalid_id", "对话 ID 无效"))?;
+        let _guard = self.lock()?;
+        let _vault_guard = self.lock_vault()?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction().map_err(sqlite_write)?;
+        let active: Option<String> = transaction.query_row("SELECT active_turn_id FROM conversations WHERE id=?1", [id], |row| row.get(0)).map_err(sqlite_read)?;
+        if active.is_some() { return Err(AppError::new("agent_turn_active", "对话仍在执行，请稍后再删除")); }
+        let directory = self.root.join("attachments").join(id);
+        crate::safe_path::check_inside(&self.root, &directory)?;
+        let staging = self.root.join(format!("deleted-{}", Uuid::new_v4()));
+        let mut files = Vec::new();
+        if directory.exists() {
+            for entry in fs::read_dir(&directory).map_err(|error| AppError::new("conversation_delete_failed", error.to_string()))? {
+                let entry = entry.map_err(|error| AppError::new("conversation_delete_failed", error.to_string()))?;
+                crate::safe_path::existing_inside(&self.root, &entry.path())?;
+                files.push(entry.file_name());
+            }
+            fs::rename(&directory, &staging).map_err(|error| AppError::new("conversation_delete_failed", error.to_string()))?;
+        }
+        let deleted = transaction.execute("DELETE FROM conversations WHERE id=?1", [id]).map_err(sqlite_write).and_then(|_| transaction.commit().map_err(sqlite_write));
+        if let Err(error) = deleted {
+            if staging.exists() { let _ = fs::rename(&staging, &directory); }
+            return Err(error);
+        }
+        if staging.exists() {
+            for file in files { fs::remove_file(staging.join(file)).map_err(|error| AppError::new("conversation_cleanup_failed", format!("对话已删除，附件清理失败：{error}")))?; }
+            fs::remove_dir(&staging).map_err(|error| AppError::new("conversation_cleanup_failed", error.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub fn list(&self) -> Result<Vec<ConversationMetadata>, AppError> {
         let _guard = self.lock()?;
         self.list_unlocked()
@@ -161,6 +213,14 @@ impl ConversationStore {
         selected_text: Option<&str>,
         attachments: &[ConversationAttachment],
     ) -> Result<(), AppError> {
+        self.append_user_context(id, request_text, display_text, selected_text, attachments, &[], None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_user_context(
+        &self, id: &str, request_text: &str, display_text: Option<&str>, selected_text: Option<&str>,
+        attachments: &[ConversationAttachment], references: &[ContextReference], context_page: Option<&ContextPage>,
+    ) -> Result<(), AppError> {
         self.append(
             id,
             ConversationRecord {
@@ -172,6 +232,8 @@ impl ConversationStore {
                     "displayText": display_text,
                     "selectedText": selected_text,
                     "attachments": attachments,
+                    "references": references,
+                    "contextPage": context_page,
                 }),
             },
         )
@@ -190,7 +252,10 @@ impl ConversationStore {
         }
         let id = Uuid::new_v4().to_string();
         let directory = self.root.join("attachments").join(conversation_id);
+        let data_root = self.root.parent().and_then(Path::parent).unwrap_or(&self.root);
+        crate::safe_path::check_inside(data_root, &directory)?;
         fs::create_dir_all(&directory).map_err(|error| AppError::new("attachment_write_failed", error.to_string()))?;
+        crate::safe_path::check_inside(data_root, &directory)?;
         let file_name = if extension.is_empty() { id.clone() } else { format!("{}.{}", id, extension) };
         fs::write(directory.join(&file_name), bytes).map_err(|error| AppError::new("attachment_write_failed", error.to_string()))?;
         let relative_path = format!("attachments/{}/{}", conversation_id, file_name);
@@ -217,9 +282,23 @@ impl ConversationStore {
         if relative.is_absolute() || components.len() < 3 || !inside_attachments || components.iter().any(|component| !matches!(component, std::path::Component::Normal(_))) {
             return Err(AppError::new("attachment_invalid_path", "附件路径不安全"));
         }
-        let path = self.root.join(relative);
-        if !path.is_file() { return Err(AppError::new("attachment_not_found", "附件不存在")); }
-        Ok(path)
+        let registered: bool = self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversation_attachments WHERE relative_path=?1)",
+            [relative_path], |row| row.get(0),
+        ).map_err(sqlite_read)?;
+        if !registered { return Err(AppError::new("attachment_not_found", "附件尚未登记")); }
+        let data_root = self.root.parent().and_then(Path::parent).unwrap_or(&self.root);
+        crate::safe_path::existing_inside(data_root, &self.root.join(relative))
+    }
+
+    pub fn registered_attachment(&self, relative_path: &str, conversation_id: &str) -> Result<ConversationAttachment, AppError> {
+        let attachment = self.connection()?.query_row(
+            "SELECT id,name,mime,size,relative_path FROM conversation_attachments WHERE relative_path=?1 AND conversation_id=?2",
+            params![relative_path, conversation_id],
+            |row| Ok(ConversationAttachment { id: row.get(0)?, name: row.get(1)?, mime: row.get(2)?, size: row.get(3)?, relative_path: row.get(4)? }),
+        ).map_err(|_| AppError::new("attachment_not_found", "附件不属于当前对话或尚未登记"))?;
+        self.attachment_path(relative_path)?;
+        Ok(attachment)
     }
 
     pub fn read_attachment_bytes(&self, relative_path: &str) -> Result<Vec<u8>, AppError> {
@@ -457,6 +536,9 @@ impl ConversationStore {
     }
 
     fn migrate_legacy(&self, legacy_root: &Path) -> Result<(), AppError> {
+        let _vault_guard = self.lock_vault()?;
+        let done: bool = self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM migration_state WHERE key='conversation_legacy_v1')", [], |row| row.get(0)).map_err(sqlite_read)?;
+        if done { return Ok(()); }
         let index = legacy_root.join("index.json");
         if !index.exists() {
             return Ok(());
@@ -473,6 +555,16 @@ impl ConversationStore {
                 for (sequence, line) in fs::read_to_string(log).map_err(|error| AppError::new("conversation_read_failed", error.to_string()))?.lines().filter(|line| !line.trim().is_empty()).enumerate() {
                     let record: ConversationRecord = serde_json::from_str(line).map_err(|error| AppError::new("conversation_invalid_data", error.to_string()))?;
                     transaction.execute("INSERT OR IGNORE INTO conversation_events(id,conversation_id,sequence,event_type,payload_json,created_at) VALUES(?1,?2,?3,?4,?5,?6)", params![format!("legacy-{}-{sequence}",conversation.id),conversation.id,sequence as i64,record.kind,serde_json::to_string(&record.data).unwrap(),record.timestamp]).map_err(sqlite_write)?;
+                    if record.kind == "userMessage" {
+                        if let Some(attachments) = record.data.get("attachments").and_then(Value::as_array) {
+                            for value in attachments {
+                                let Ok(attachment) = serde_json::from_value::<ConversationAttachment>(value.clone()) else { continue; };
+                                let prefix = format!("attachments/{}/", conversation.id);
+                                if !attachment.relative_path.starts_with(&prefix) || Uuid::parse_str(&attachment.id).is_err() { continue; }
+                                transaction.execute("INSERT OR IGNORE INTO conversation_attachments(id,conversation_id,name,relative_path,mime,size,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![attachment.id,conversation.id,attachment.name,attachment.relative_path,attachment.mime,attachment.size as i64,record.timestamp]).map_err(sqlite_write)?;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -483,6 +575,7 @@ impl ConversationStore {
             crate::portable::copy_tree_verified(&legacy_attachments, &destination)
                 .map_err(|error| AppError::new("conversation_migration_failed", error.to_string()))?;
         }
+        self.connection()?.execute("INSERT OR IGNORE INTO migration_state(key,completed_at) VALUES('conversation_legacy_v1',?1)", [now()]).map_err(sqlite_write)?;
         Ok(())
     }
 
@@ -635,6 +728,30 @@ mod tests {
             store.list().unwrap()[0].thread_id.as_deref(),
             Some("thread-1")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deleting_conversation_cleans_only_its_data_and_does_not_reimport_legacy() {
+        let root = std::env::temp_dir().join(format!("qingyu-delete-conversation-{}", Uuid::new_v4()));
+        let store = ConversationStore::open(&root).unwrap();
+        let conversation = store.create("待删除对话".into(), ConversationScope::Vault).unwrap();
+        let kept = store.create("保留对话".into(), ConversationScope::Vault).unwrap();
+        let attachment = store.store_attachment(&conversation.id, "example.txt", "text/plain", b"test").unwrap();
+        store.append_user_message(&conversation.id, "示例", None, None, &[]).unwrap();
+        let legacy = root.join(".noteapp").join("conversations");
+        fs::write(legacy.join("index.json"), serde_json::to_vec(&vec![&conversation]).unwrap()).unwrap();
+        let store = ConversationStore::open(&root).unwrap();
+        store.set_active_turn(&conversation.id, Some("running".into())).unwrap();
+        assert_eq!(store.delete(&conversation.id).unwrap_err().code, "agent_turn_active");
+        store.set_active_turn(&conversation.id, None).unwrap();
+        store.delete(&conversation.id).unwrap();
+        assert!(!store.root.join(&attachment.relative_path).exists());
+        let reopened = ConversationStore::open(&root).unwrap();
+        assert_eq!(reopened.list().unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![kept.id.as_str()]);
+        assert_eq!(reopened.history(&conversation.id).unwrap_err().code, "conversation_not_found");
+        let connection = reopened.connection().unwrap();
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM conversation_events WHERE conversation_id=?1", [&conversation.id], |row| row.get::<_,i64>(0)).unwrap(), 0);
         let _ = fs::remove_dir_all(root);
     }
 

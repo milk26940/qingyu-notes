@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAgentDraftStore } from "../../stores/agentDraftStore";
 import { AgentPanel } from "./AgentPanel";
 
 const openConversation = vi.hoisted(() => vi.fn());
@@ -43,6 +44,7 @@ vi.mock("../../stores/agentStore", () => ({
       create: vi.fn(),
       open: openConversation,
       send,
+      enqueue: vi.fn(() => true),
       uploadAttachments,
       interrupt,
       resolveApproval: vi.fn(),
@@ -70,6 +72,11 @@ vi.mock("../../stores/workspaceStore", () => ({
 }));
 
 describe("AgentPanel", () => {
+  beforeEach(() => {
+    useAgentDraftStore.setState({ drafts: {}, targetConversationId: null });
+    send.mockResolvedValue(true);
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} unobserve() {} });
+  });
   afterEach(() => {
     cleanup();
     mockSending = false;
@@ -181,14 +188,14 @@ describe("AgentPanel", () => {
     await waitFor(() => expect(screen.getByRole("img", { name: "粘贴图片.png" })).toHaveAttribute("src", "blob:agent-image"));
   });
 
-  it("默认展示跟随 Codex 配置并在有默认模型时辅助显示名称", () => {
+  it("默认展示内置 Agent 配置并在有默认模型时辅助显示名称", () => {
     mockModels = [
       { id: "gpt-4o", model: "gpt-4o", displayName: "GPT-4o", description: "默认主力", isDefault: true, inputModalities: [] },
       { id: "claude", model: "claude", displayName: "Claude", description: "备选", isDefault: false, inputModalities: [] },
     ];
     render(<AgentPanel />);
     const selectorButton = screen.getByRole("button", { name: "选择模型" });
-    expect(selectorButton).toHaveTextContent("跟随 Codex (GPT-4o)");
+    expect(selectorButton).toHaveTextContent("默认模型 (GPT-4o)");
   });
 
   it("点击弹出模型选择菜单并支持选择具体模型与切回默认", () => {

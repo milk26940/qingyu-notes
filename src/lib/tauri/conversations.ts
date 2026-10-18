@@ -5,6 +5,20 @@ export type ConversationScope = { kind: "vault" } | { kind: "page"; pageId: stri
 export type ConversationMetadata = { id: string; threadId: string | null; title: string; scope: ConversationScope; createdAt: string; updatedAt: string; activeTurnId: string | null };
 export type ConversationRecord = { kind: string; timestamp: string; data: Record<string, unknown> };
 export type ConversationAttachment = { id: string; name: string; mime: string; size: number; relativePath: string };
+export type ContextReference = {
+  id: string;
+  source: "page" | "conversation";
+  text: string;
+  title: string;
+  pageId?: string;
+  pageRevision?: number;
+  blockIds?: string[];
+  conversationId?: string;
+  messageId?: string;
+  from?: number;
+  to?: number;
+};
+export type ContextPage = { id: string; title: string };
 export type CodexItemSummary = { id?: string; itemType?: string; status?: string; tool?: string; namespace?: string; phase?: string | null; text?: string | null };
 export type CodexStreamEvent =
   | { kind: "agentMessageDelta"; threadId: string; turnId: string; itemId: string; delta: string }
@@ -18,6 +32,7 @@ export type ConversationPersistenceError = { code: string; message: string };
 
 export const createConversation = (title: string, scope: ConversationScope, model?: string | null) =>
   invoke<ConversationMetadata>("conversation_create", { title, scope, model: model ?? undefined });
+export const deleteConversation = (id: string) => invoke<void>("conversation_delete", { id });
 export const listConversations = () => invoke<ConversationMetadata[]>("conversation_list");
 export const getConversationHistory = (id: string) => invoke<ConversationRecord[]>("conversation_history", { id });
 export const sendConversationMessage = (
@@ -27,6 +42,8 @@ export const sendConversationMessage = (
   displayText?: string,
   selectedText?: string,
   model?: string | null,
+  references: ContextReference[] = [],
+  contextPage?: ContextPage,
 ) => invoke<{ threadId: string; turnId: string }>("conversation_send", {
   id,
   text,
@@ -34,6 +51,8 @@ export const sendConversationMessage = (
   displayText,
   selectedText,
   model: model ?? undefined,
+  references,
+  contextPage,
 });
 export const storeConversationAttachment = (id: string, originalName: string, mime: string, bytes: number[]) => invoke<ConversationAttachment>("conversation_store_attachment", { id, originalName, mime, bytes });
 export const storeConversationAttachmentPath = (id: string, sourcePath: string) => invoke<ConversationAttachment>("conversation_store_attachment_path", { id, sourcePath });

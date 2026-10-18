@@ -4,11 +4,13 @@ import {
   ChevronDown,
   FileText,
   History,
+  Trash2,
   LoaderCircle,
   MessageSquarePlus,
   PanelRightClose,
   RotateCw,
   Send,
+  Settings,
   Sparkles,
   Square,
   X,
@@ -29,6 +31,11 @@ import { AttachmentPreview } from "./AgentContent";
 import { conversationTimeline, requestText } from "./conversationTimeline";
 import { ConversationTurn } from "./ConversationTurn";
 import { MessageQueue } from "./MessageQueue";
+import { agentDraftKey, EMPTY_AGENT_DRAFT, useAgentDraftStore } from "../../stores/agentDraftStore";
+import { ContextReferences } from "./ContextReferences";
+import { AgentSettings } from "./AgentSettings";
+import { AgentAvatar } from "./AgentAvatar";
+import xiaoyu from "../../assets/agent/xiaoyu.webp";
 
 function scopeLabel(scope: ConversationScope) {
   if (scope.kind === "page") return "当前页面";
@@ -85,8 +92,18 @@ export const AgentPanel = memo(function AgentPanel({
     uploadAttachmentPaths,
     interrupt,
     resolveApproval,
+    removeConversation,
   } = useAgentStore();
-  const [prompt, setPrompt] = useState("");
+  const draftKey = agentDraftKey(activeId);
+  const draft = useAgentDraftStore((state) => state.drafts[draftKey] ?? EMPTY_AGENT_DRAFT);
+  const { prompt, attachments, references } = draft;
+  const setPrompt = (value: string) => useAgentDraftStore.getState().setPrompt(draftKey, value);
+  const setAttachments = (update: ConversationAttachment[] | ((current: ConversationAttachment[]) => ConversationAttachment[])) => {
+    const store = useAgentDraftStore.getState();
+    const key = agentDraftKey(store.targetConversationId ?? activeId);
+    const current = store.drafts[key]?.attachments ?? [];
+    store.setAttachments(key, typeof update === "function" ? update(current) : update);
+  };
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const inputZoneRef = useRef<HTMLDivElement>(null);
@@ -94,11 +111,23 @@ export const AgentPanel = memo(function AgentPanel({
   const modelOptionsRef = useRef<HTMLDivElement>(null);
   const [modelPosition, setModelPosition] = useState({ left: 0, bottom: 0, width: 280, maxHeight: 280 });
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
-  const [attachments, setAttachments] = useState<ConversationAttachment[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  useEffect(() => { useAgentDraftStore.getState().setTargetConversation(activeId); }, [activeId]);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const previousSending = useRef(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const historyRef = useRef<HTMLDivElement>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  useEffect(() => {
+    if (!historyOpen && !deleteTarget) return;
+    const pointer = (event: PointerEvent) => { if (!historyRef.current?.contains(event.target as Node) && !(event.target as Element).closest?.('[aria-label="历史对话"]')) setHistoryOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") { setHistoryOpen(false); if (!deleting) setDeleteTarget(null); } };
+    document.addEventListener("pointerdown", pointer); window.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", pointer); window.removeEventListener("keydown", escape); };
+  }, [historyOpen, deleteTarget, deleting]);
   useEffect(() => {
     localStorage.setItem("qingyu-agent-mode", "auto");
   }, []);
@@ -191,9 +220,9 @@ export const AgentPanel = memo(function AgentPanel({
       return selectedModelOption?.displayName || selectedModel;
     }
     if (defaultModel) {
-      return `跟随 Codex (${defaultModel.displayName})`;
+      return `默认模型 (${defaultModel.displayName})`;
     }
-    return "跟随 Codex";
+    return "默认模型";
   }, [selectedModel, selectedModelOption, defaultModel]);
 
   const addFiles = async (files: File[]) => {
@@ -254,28 +283,34 @@ export const AgentPanel = memo(function AgentPanel({
       unlisten?.();
     };
   }, [scope, uploadAttachmentPaths]);
-  const submit = () => {
-    if (!ready || uploading || (sending && !activeId)) return;
+  const submit = async () => {
+    if (!ready || uploading || submitting || (sending && !activeId)) return;
     const text = prompt.trim();
     const selection = selectedText.trim();
     const hasAttachments = attachments.length > 0;
-    if (!text && !selection && !hasAttachments) return;
+    if (!text && !selection && !hasAttachments && !references.length) return;
 
     const outgoingText = requestText(text, selection || undefined, includePage ? activePage : null);
     const outgoing = attachments;
 
-    setPrompt("");
-    setAttachments([]);
-    onClearSelection?.();
-
+    setSubmitting(true);
+    const submitted = draft;
     const dispatch = sending || queued.length > 0 ? enqueue : send;
-    void dispatch({
+    const accepted = await dispatch({
       requestText: outgoingText,
       displayText: text,
       selectedText: selection ? selectedText : undefined,
       attachments: outgoing,
+      references,
+      contextPage: includePage && activePage ? { id: activePage.id, title: activePage.title } : undefined,
       scope,
     });
+    if (accepted) {
+      const key = draftKey === "draft" ? agentDraftKey(useAgentDraftStore.getState().targetConversationId) : draftKey;
+      useAgentDraftStore.getState().consumeDraft(key, submitted);
+      onClearSelection?.();
+    }
+    setSubmitting(false);
   };
 
   return (
@@ -283,17 +318,14 @@ export const AgentPanel = memo(function AgentPanel({
       className="agent-panel flex min-h-0 flex-col overflow-hidden rounded-[22px] border border-white bg-[var(--qy-sidebar)] shadow-[var(--qy-panel-shadow)]"
       aria-label="Agent 面板"
     >
-      <div className="relative flex h-10 items-center justify-between border-b border-[var(--qy-border)] px-3">
+      <div className="qy-agent-header relative flex items-center justify-between border-b border-[var(--qy-border)] px-3">
         <div className="flex min-w-0 items-center gap-2 text-[14px] font-semibold">
-          <Bot size={16} />
-          <span className="shrink-0">Agent</span>
-          {activePage && (
-            <span className="truncate text-[12px] font-medium text-[var(--qy-faint)]">
-              {activePage.title}
-            </span>
-          )}
+          <AgentAvatar/>
+          <span className="shrink-0">小羽</span>
+          <span className="truncate text-[12px] font-medium text-[var(--qy-faint)]">{activePage?.title ?? "你的笔记助手"}</span>
         </div>
         <div className="flex items-center gap-1">
+          <button type="button" className="icon-button" aria-label="内置 Agent 设置" title="小羽设置" onClick={() => setSettingsOpen(true)}><Settings size={15}/></button>
           <button
             className="icon-button"
             title="历史对话"
@@ -321,15 +353,16 @@ export const AgentPanel = memo(function AgentPanel({
             <PanelRightClose size={16} />
           </button>
         </div>
+        {deleteTarget && createPortal(<div className="qy-change-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget && !deleting) setDeleteTarget(null); }}><section role="alertdialog" aria-modal="true" aria-label="删除对话" className="qy-agent-settings"><header><strong>删除对话</strong></header><p>确定删除“{deleteTarget.title}”及其专属附件？此操作不会撤销 Agent 已经修改的笔记。</p><p>如果对话仍在运行，会先停止并等待当前操作结束。</p>{error && <p role="alert">{error}</p>}<footer><button type="button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button><button type="button" disabled={deleting} onClick={() => { setDeleting(true); void removeConversation(deleteTarget.id).then((removed) => { if (removed) setDeleteTarget(null); }).finally(() => setDeleting(false)); }}>{deleting ? "正在停止并删除…" : "删除对话"}</button></footer></section></div>, document.body)}
         {historyOpen && (
           <div
             className="absolute right-2 top-9 z-20 max-h-80 w-[min(320px,calc(100vw-32px))] overflow-y-auto rounded-2xl border border-[var(--qy-border)] bg-white p-1.5 shadow-[var(--qy-float-shadow)]"
+            ref={historyRef}
             aria-label="历史对话列表"
           >
             {sortedConversations.length ? (
               sortedConversations.map((conversation) => (
-                <button
-                  key={conversation.id}
+                <div className="qy-agent-history-row" key={conversation.id}><button
                   type="button"
                   aria-label={`打开 ${conversation.title}`}
                   disabled={sending || uploading}
@@ -354,7 +387,7 @@ export const AgentPanel = memo(function AgentPanel({
                       size={14}
                     />
                   )}
-                </button>
+                </button><button type="button" className="icon-button" aria-label={`删除 ${conversation.title}`} title="删除对话" disabled={uploading || deleting} onClick={() => { setHistoryOpen(false); setDeleteTarget({ id: conversation.id, title: conversation.title }); }}><Trash2 size={14}/></button></div>
               ))
             ) : (
               <div className="px-3 py-6 text-center text-[12px] text-[var(--qy-faint)]">
@@ -364,7 +397,7 @@ export const AgentPanel = memo(function AgentPanel({
           </div>
         )}
       </div>
-      <div ref={messageViewport} className="min-h-0 flex-1 overflow-y-auto px-3 py-3" onScroll={(event) => { const element = event.currentTarget; followReply.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64; setShowLatest(!followReply.current); }}>
+      <div ref={messageViewport} data-agent-viewport className="min-h-0 flex-1 overflow-y-auto px-3 py-3" onScroll={(event) => { const element = event.currentTarget; followReply.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64; setShowLatest(!followReply.current); }}>
         {!ready && (
           <div className="flex h-full flex-col items-center justify-center text-center text-[13px] text-[var(--qy-muted)]">
             {status.state === "starting" ? (
@@ -376,8 +409,8 @@ export const AgentPanel = memo(function AgentPanel({
               {status.state === "failed"
                 ? status.message
                 : status.state === "starting"
-                  ? "正在连接本机 Codex"
-                  : "Codex 未连接"}
+                  ? "正在启动内置 Agent"
+                  : "内置 Agent 尚未就绪，请检查设置"}
             </p>
             {status.state === "failed" && (
               <button
@@ -391,24 +424,21 @@ export const AgentPanel = memo(function AgentPanel({
           </div>
         )}
         {ready && turns.length === 0 && (
-          <div className="grid h-full place-items-center text-center text-[13px] font-medium text-[var(--qy-faint)]">
-            <div>
-              <Bot className="mx-auto mb-2" size={22} />
-              <p>
-                {activePage
-                  ? `已识别当前页面：${activePage.title}`
-                  : "已连接整个笔记库"}
-              </p>
-            </div>
+          <div className="qy-agent-welcome">
+            <img className="qy-agent-mascot" src={xiaoyu} alt="小羽，轻羽的 Q 版笔记助手" draggable={false}/>
+            <h2>你好呀，我是小羽</h2>
+            <p className="qy-agent-welcome-description">陪你整理灵感，把想法写进笔记。</p>
+            <span className="qy-agent-scope"><span aria-hidden="true"/>{activePage ? `当前页面 · ${activePage.title}` : "已连接整个笔记库"}</span>
+            <div className="qy-agent-suggestions" aria-label="开始对话">{[{ label: "总结笔记", prompt: activePage ? "请只读当前页面，概括重点和待办事项。" : "请先检索我的笔记，列出最近可以整理的内容，不要修改。" }, { label: "整理片段", prompt: "请帮我整理添加的引用片段，保留原意，先给我整理建议。" }, { label: "写点什么", prompt: "我想写一篇新笔记，请先和我一起梳理主题与提纲。" }].map((item) => <button key={item.label} type="button" onClick={() => { setPrompt(item.prompt); promptRef.current?.focus(); }}>{item.label}<span aria-hidden="true">↗</span></button>)}</div>
           </div>
         )}
-        {ready && <div className="qy-conversation-log" role="log" aria-label="对话消息">
+        {ready && turns.length > 0 && <div className="qy-conversation-log" role="log" aria-label="对话消息">
           {firstVisible > 0 && <button type="button" className="qy-load-earlier" onClick={() => {
             const element = messageViewport.current; const height = element?.scrollHeight ?? 0;
             followReply.current = false; setVisibleCount((count) => count + 20);
             requestAnimationFrame(() => { if (element) element.scrollTop += element.scrollHeight - height; });
           }}>加载更早的对话</button>}
-          {turns.slice(firstVisible).map((turn) => <ConversationTurn key={turn.key} turn={turn} expanded={expandedTurns[turn.key] ?? false} onToggle={() => setExpandedTurns((current) => ({ ...current, [turn.key]: !current[turn.key] }))}/>)}
+          {turns.slice(firstVisible).map((turn) => <ConversationTurn key={turn.key} conversationId={activeId} turn={turn} expanded={expandedTurns[turn.key] ?? false} onToggle={() => setExpandedTurns((current) => ({ ...current, [turn.key]: !current[turn.key] }))}/>)}
         </div>}
         {error && !turns.some((turn) => turn.error === error) && <div className="mt-3 text-[12px] font-medium text-red-600" role="alert">{error}</div>}
       </div>
@@ -417,6 +447,7 @@ export const AgentPanel = memo(function AgentPanel({
         <div className="qy-agent-composer">
         <MessageQueue messages={queued} paused={paused} sending={sending} edit={editQueued} remove={removeQueued} resume={resumeQueue}/>
         <div className="qy-composer-context">{includePage && activePage && <span><button type="button" onClick={() => void openPage(activePage.id)}><FileText size={12}/>{activePage.title}</button><button type="button" aria-label="移除当前页面上下文" onClick={() => setIncludePage(false)}><X size={12}/></button></span>}{selectedText.trim() && <details><summary>引用 · {selectedText.match(/第\s*\d+(?:\s*[-–至]\s*\d+)?\s*行/)?.[0] ?? "选中文本"}</summary><pre>{selectedText}</pre></details>}</div>
+        <ContextReferences references={references} onRemove={(id) => useAgentDraftStore.getState().removeReference(draftKey, id)} onClear={() => useAgentDraftStore.getState().clearReferences(draftKey)}/>
         <input
           ref={attachmentInputRef}
           className="hidden"
@@ -463,20 +494,23 @@ export const AgentPanel = memo(function AgentPanel({
             <div ref={modelMenuRef} className="qy-composer-model">
               <button type="button" aria-label="选择模型" aria-haspopup="listbox" aria-expanded={modelMenuOpen} disabled={sending || !ready} title={selectedModelOption?.description || modelButtonLabel} onClick={() => setModelMenuOpen((value) => !value)}><Sparkles size={13}/><span>{modelButtonLabel}</span>{modelsLoading ? <LoaderCircle size={12} className="animate-spin"/> : <ChevronDown size={12}/>}</button>
               {modelMenuOpen && createPortal(<div ref={modelOptionsRef} role="listbox" aria-label="模型列表" className="qy-model-options" style={{ position: "fixed", ...modelPosition }}>
-                <button type="button" role="option" aria-selected={selectedModel === null} onClick={() => { setSelectedModel(null); setModelMenuOpen(false); }}><span>跟随 Codex<small>{defaultModel ? "当前配置默认：" + defaultModel.displayName : "使用本机 Codex 默认模型"}</small></span>{selectedModel === null && <Check size={14}/>}</button>
+                <button type="button" role="option" aria-selected={selectedModel === null} onClick={() => { setSelectedModel(null); setModelMenuOpen(false); }}><span>默认模型<small>{defaultModel ? "当前配置默认：" + defaultModel.displayName : "使用 Agent 设置中的默认模型"}</small></span>{selectedModel === null && <Check size={14}/>}</button>
                 {models.map((item) => <button key={item.id} type="button" role="option" aria-selected={selectedModel === item.model} onClick={() => { setSelectedModel(item.model); setModelMenuOpen(false); }}><span>{item.displayName}{item.description && <small>{item.description}</small>}</span>{selectedModel === item.model && <Check size={14}/>}</button>)}
+                <label className="qy-manual-model">手动填写模型<input aria-label="手动填写模型" placeholder="输入模型 ID，回车使用" defaultValue={selectedModel ?? ""} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { const value = event.currentTarget.value.trim(); if (value) { setSelectedModel(value); setModelMenuOpen(false); } } }}/></label>
+                <button type="button" onClick={() => void loadModels()} disabled={modelsLoading}>刷新模型列表</button>
                 {modelsError && <p>获取模型列表受限：{modelsError}</p>}
               </div>, document.body)}
             </div>
-            {sending && <button type="button" className="qy-enqueue-button" aria-label="加入下一轮队列" disabled={uploading || !activeId || (!prompt.trim() && !selectedText.trim() && attachments.length === 0)} onClick={submit}>排队</button>}
+            {sending && <button type="button" className="qy-enqueue-button" aria-label="加入下一轮队列" disabled={uploading || submitting || !activeId || (!prompt.trim() && !selectedText.trim() && attachments.length === 0 && references.length === 0)} onClick={submit}>排队</button>}
             <button type="button" className={"agent-send-button icon-button " + (sending ? "is-sending" : "")} title={sending ? "停止" : "发送"} aria-label={sending ? "停止" : "发送消息"}
-              disabled={!ready || (!sending && (uploading || (!prompt.trim() && !selectedText.trim() && attachments.length === 0)))}
+              disabled={!ready || (!sending && (submitting || uploading || (!prompt.trim() && !selectedText.trim() && attachments.length === 0 && references.length === 0)))}
               onClick={() => { if (sending) void interrupt(); else submit(); }}>{sending ? <Square size={13} className="fill-current"/> : <Send size={16}/>}</button>
           </div>
         </div>
         {modelsError && <div className="qy-model-warning"><span title={modelsError}>模型刷新受限</span><button type="button" aria-label="重试加载模型" onClick={() => void loadModels?.()}>重试</button></div>}
         </div>
       </div>
+      {settingsOpen && <AgentSettings close={() => setSettingsOpen(false)}/>}
     </aside>
   );
 });

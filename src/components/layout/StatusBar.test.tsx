@@ -18,7 +18,7 @@ describe("状态栏", () => {
 
     expect(screen.getByText("已保存")).toBeInTheDocument();
     expect(screen.getByText("备份进行中")).toBeInTheDocument();
-    expect(screen.getByText("索引就绪")).toBeInTheDocument();
+    expect(screen.getByText("搜索就绪")).toBeInTheDocument();
   });
 
   it("连接成功时显示连接图标而不是断开斜线", () => {

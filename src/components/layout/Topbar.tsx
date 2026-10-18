@@ -33,6 +33,19 @@ export function Topbar({
     y: number;
   } | null>(null);
   const tabMenuRef = useRef<HTMLDivElement>(null);
+  const tabScroller = useRef<HTMLDivElement>(null);
+  const previousTabs = useRef<string[]>([]);
+  useEffect(() => {
+    const scroller = tabScroller.current; if (!scroller) return;
+    const added = tabs.some((tab) => !previousTabs.current.includes(tab.pageId));
+    previousTabs.current = tabs.map((tab) => tab.pageId);
+    if (added) scroller.scrollLeft = scroller.scrollWidth;
+    else {
+      const active = Array.from(scroller.querySelectorAll<HTMLElement>("[data-tab-id]")).find((node) => node.dataset.tabId === activeTabId);
+      if (active && activeTabId !== scroller.dataset.activeTab) active.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    }
+    scroller.dataset.activeTab = activeTabId ?? "";
+  }, [tabs, activeTabId]);
   useEffect(() => {
     if (!tabMenu) return;
     const close = (event: PointerEvent) => {
@@ -63,7 +76,7 @@ export function Topbar({
         <span className="hidden text-[15px] font-bold sm:inline">轻羽</span>
       </div>
       <div className="min-w-0 overflow-hidden">
-        <div className="qy-tabs-scroll flex min-w-0 items-center gap-1 overflow-x-auto px-2">
+        <div ref={tabScroller} className="qy-tabs-scroll flex min-w-0 items-center gap-1 overflow-x-auto px-2">
         {tabs.length === 0 && (
           <span className="px-2 text-[12px] text-[var(--qy-faint)]">
             打开一个页面开始编辑
@@ -72,6 +85,7 @@ export function Topbar({
         {tabs.map((tab) => (
           <div
             key={tab.pageId}
+            data-tab-id={tab.pageId}
             onContextMenu={(event) => {
               event.preventDefault();
               setTabMenu({
@@ -84,7 +98,7 @@ export function Topbar({
           >
             <button
               type="button"
-              className="max-w-40 truncate"
+              className="qy-tab-title min-w-0 max-w-40 truncate text-left"
               onClick={() => onSelectTab?.(tab.pageId)}
             >
               {tab.title}
@@ -93,7 +107,7 @@ export function Topbar({
               type="button"
               aria-label={`关闭${tab.title}`}
               title="关闭标签"
-              className="opacity-60 hover:opacity-100"
+              className="qy-tab-close shrink-0 opacity-60 hover:opacity-100"
               onClick={() => onCloseTab?.(tab.pageId)}
             >
               <X size={12} />

@@ -168,23 +168,26 @@ impl DatabaseRepository {
         expected: Option<&Page>,
     ) -> Result<Page, AppError> {
         let definition = self.get(database_id)?;
-        let record = self.pages.get(record_id, false)?;
-        if expected.is_some_and(|expected| expected != &record) {
-            return Err(AppError::new(
-                "approval_stale_data",
-                "数据库记录在审批期间已发生变化，请重新发起操作",
-            ));
-        }
-        if record.kind != PageKind::DatabaseRecord
-            || record.database_id.as_deref() != Some(database_id)
-        {
-            return Err(AppError::new(
-                "database_record_not_found",
-                "记录不属于当前数据库",
-            ));
-        }
         self.validate_properties(&definition, &properties)?;
         self.pages.with_transaction(|transaction| {
+            let record = crate::pages::repository::load_page(transaction, record_id)?;
+            if record.trashed_at.is_some() {
+                return Err(AppError::new("page_not_found", "页面不在当前视图"));
+            }
+            if expected.is_some_and(|expected| expected != &record) {
+                return Err(AppError::new(
+                    "approval_stale_data",
+                    "数据库记录在审批期间已发生变化，请重新发起操作",
+                ));
+            }
+            if record.kind != PageKind::DatabaseRecord
+                || record.database_id.as_deref() != Some(database_id)
+            {
+                return Err(AppError::new(
+                    "database_record_not_found",
+                    "记录不属于当前数据库",
+                ));
+            }
             let updated = self.pages.update_properties_tx(transaction, record, title, properties.clone())?;
             write_record_values_tx(transaction, &updated, &properties)?;
             Ok(updated)

@@ -8,6 +8,11 @@ export type CodexStatus =
   | { state: "failed"; code: string; message: string };
 
 export type CodexError = { code: string; message: string };
+export type AgentSettings = { baseUrl: string; model: string; hasApiKey: boolean; workspaceRoot: string };
+export type AgentConnectionTest = { model: string; text: boolean; tools: boolean; images: boolean; details: string[] };
+export const getAgentSettings = () => invoke<AgentSettings>("agent_settings_get");
+export const saveAgentSettings = (settings: { baseUrl: string; model: string; apiKey?: string; clearApiKey?: boolean }) => invoke<AgentSettings>("agent_settings_save", settings);
+export const testAgentConnection = (model?: string) => invoke<AgentConnectionTest>("agent_test_connection", { model });
 
 export type CodexModelOption = {
   id: string;

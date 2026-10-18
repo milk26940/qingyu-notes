@@ -3,6 +3,8 @@ import { memo, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { usePagesStore } from "../../stores/pagesStore";
 import { AgentMarkdown, AttachmentPreview } from "./AgentContent";
+import { ContextReferences, QuotableMessage } from "./ContextReferences";
+import { AgentAvatar } from "./AgentAvatar";
 import { statusLabel, toolLabel, type TimelineTurn, type TimelineChange } from "./conversationTimeline";
 
 function ChangeReview({ changes, close }: { changes: TimelineChange[]; close: () => void }) {
@@ -27,7 +29,7 @@ function Plan({ value }: { value: unknown }) {
   return entries.length ? <ul className="qy-turn-plan">{entries.map((entry, index) => { const step = typeof entry === "string" ? entry : String(entry?.step ?? entry?.title ?? ""); return <li key={index}>{typeof entry === "object" && entry?.status === "completed" ? "✓ " : "· "}{step}</li>; })}</ul> : null;
 }
 
-export const ConversationTurn = memo(function ConversationTurn({ turn, expanded, onToggle }: { turn: TimelineTurn; expanded: boolean; onToggle: () => void }) {
+export const ConversationTurn = memo(function ConversationTurn({ turn, expanded, onToggle, conversationId }: { turn: TimelineTurn; expanded: boolean; onToggle: () => void; conversationId?: string | null }) {
   const openPage = usePagesStore((state) => state.open);
   const [review, setReview] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -47,16 +49,18 @@ export const ConversationTurn = memo(function ConversationTurn({ turn, expanded,
   return <article className="qy-conversation-turn" aria-label={turn.user?.text ? "对话：" + turn.user.text.slice(0, 40) : "Agent 回复"}>
     {turn.user && <div className="qy-turn-user">
       <div className="qy-turn-context">{turn.user.page && <button type="button" onClick={() => void openPage(turn.user!.page!.id)}><FileText size={12}/>{turn.user.page.title}</button>}{turn.user.selectedText && <details><summary>引用 · {turn.user.selectedText.match(/第\s*\d+(?:\s*[-–至]\s*\d+)?\s*行/)?.[0] ?? "选中文本"}</summary><pre>{turn.user.selectedText}</pre></details>}</div>
-      {turn.user.text && <div className="qy-turn-user-text">{turn.user.text}</div>}
+      <ContextReferences references={turn.user.references ?? []}/>
+      {turn.user.text && <QuotableMessage className="qy-turn-user-text" conversationId={conversationId} messageId={(turn.turnId ?? turn.key) + ":user"} title="用户消息">{turn.user.text}</QuotableMessage>}
       {turn.user.attachments.length > 0 && <div className="qy-turn-attachments">{turn.user.attachments.map((attachment) => <AttachmentPreview key={attachment.id} attachment={attachment}/>)}</div>}
     </div>}
     <div className="qy-turn-assistant">
-      {commentary.map((message) => <div key={message.id} className="qy-turn-commentary"><AgentMarkdown text={message.text}/></div>)}
+      <div className="qy-assistant-identity"><AgentAvatar/><span>小羽</span>{working && <small>正在处理</small>}</div>
+      {commentary.map((message) => <QuotableMessage key={message.id} className="qy-turn-commentary" conversationId={conversationId} messageId={message.id} title="助手消息"><AgentMarkdown text={message.text}/></QuotableMessage>)}
       {(tools.length > 0 || turn.plan != null || working) && <div className="qy-turn-work">
         <button className="qy-turn-work-toggle" type="button" aria-expanded={expanded} onClick={onToggle}>{working ? <LoaderCircle size={14} className="animate-spin"/> : failed ? <AlertCircle size={14}/> : turn.status === "completed" ? <Check size={14}/> : <span>·</span>}<span>{working ? current ? toolLabel(current) : "正在回复" : workSummary}</span><ChevronDown size={13} className={expanded ? "rotate-180" : ""}/></button>
         {expanded && <div className="qy-turn-work-body"><Plan value={turn.plan}/>{tools.map((tool) => <details key={tool.id} className="qy-tool-record"><summary><span>{tool.status === "completed" ? "✓" : tool.status === "failed" ? "!" : "·"}</span><span>{toolLabel(tool)}</span><small>{statusLabel(tool.status)}</small></summary><pre>{[tool.namespace ? tool.namespace + "." + tool.tool : tool.tool, tool.error, tool.arguments ? JSON.stringify(tool.arguments, null, 2) : ""].filter(Boolean).join("\n")}</pre></details>)}</div>}
       </div>}
-      {answers.map((message) => <div key={message.id} className="qy-turn-answer"><AgentMarkdown text={message.text}/></div>)}
+      {answers.map((message) => <QuotableMessage key={message.id} className="qy-turn-answer" conversationId={conversationId} messageId={message.id} title="助手回复"><AgentMarkdown text={message.text}/></QuotableMessage>)}
       {failed && <div className="qy-turn-error" role="alert">请求失败：{turn.error || "本轮未正常完成，已保留收到的内容。"}</div>}
       {turn.status === "interrupted" && <div className="qy-turn-ended">本轮已停止。已完成的写入仍然保留。</div>}
       {!working && turn.status === "completed" && answers.length === 0 && <div className="qy-turn-ended">本轮已结束，未返回最终答复。{confirmed.length ? "可在下方查看已确认的修改。" : ""}</div>}

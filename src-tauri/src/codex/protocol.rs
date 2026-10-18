@@ -44,7 +44,7 @@ pub struct CodexItemSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum CodexEvent {
     AgentMessageDelta {
         thread_id: String,
@@ -285,6 +285,16 @@ fn summarize_item(item: Option<&Value>) -> CodexItemSummary {
 }
 
 pub fn qingyu_dynamic_tools() -> Value {
+    let block_schema = json!({
+        "type": "object", "description": "区块 id 稳定且在页面中唯一；type 使用编辑器类型，如 paragraph、heading、bulletList、orderedList、listItem、taskList、taskItem、codeBlock、blockquote、horizontalRule、image、table、tableRow、tableCell、tableHeader；children 为同结构的子区块数组。读取到的其他类型应原样保留。",
+        "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "type": { "type": "string", "minLength": 1 },
+            "text": { "type": "string" },
+            "attrs": { "type": "object", "description": "区块属性，例如标题 level、代码 language" },
+            "children": { "type": "array", "items": { "$ref": "#/$defs/BlockNode" } }
+        }, "required": ["id", "type", "text", "attrs", "children"]
+    });
     let page_tools = [
         (
             "search",
@@ -315,6 +325,7 @@ pub fn qingyu_dynamic_tools() -> Value {
         ("archive", "将页面移入回收站", id_schema("id")),
     ];
     let database_tools = [
+        ("read", "读取数据库字段模型；修改结构前必须先读取", id_schema("databaseId")),
         (
             "query",
             "按组合筛选和多字段排序查询数据库记录",
@@ -342,12 +353,21 @@ pub fn qingyu_dynamic_tools() -> Value {
         ("backlinks", "读取页面反向链接", id_schema("id")),
     ];
     let attachment_tools = [("read", "读取当前对话中附件的文本内容", id_schema("path"))];
-    json!([
+    let mut namespaces = json!([
         namespace("page", "操作轻羽结构化页面和区块", &page_tools),
         namespace("database", "操作轻羽数据库和记录", &database_tools),
         namespace("relation", "操作页面 UUID 关系", &relation_tools),
         namespace("attachment", "只读访问用户添加到对话的附件", &attachment_tools)
-    ])
+    ]);
+    for namespace in namespaces.as_array_mut().unwrap() {
+        for tool in namespace["tools"].as_array_mut().unwrap() {
+            if tool["inputSchema"]["properties"].get("block").is_some() {
+                tool["inputSchema"]["$defs"] = json!({ "BlockNode": block_schema });
+                tool["inputSchema"]["properties"]["block"] = json!({ "$ref": "#/$defs/BlockNode" });
+            }
+        }
+    }
+    namespaces
 }
 
 fn id_schema(name: &str) -> Value {

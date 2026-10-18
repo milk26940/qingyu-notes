@@ -36,7 +36,7 @@ describe("useCodexStore", () => {
     mocks.subscribeCodexConfigChanges.mockResolvedValue(() => undefined);
   });
 
-  it("配置变化后等待用户确认重启", async () => {
+  it("内置 Agent 配置即时生效，不要求重启", async () => {
     let configHandler = () => undefined;
     mocks.subscribeCodexStatus.mockResolvedValue(() => undefined);
     mocks.subscribeCodexConfigChanges.mockImplementation(async (handler) => { configHandler = handler; return () => undefined; });
@@ -44,7 +44,8 @@ describe("useCodexStore", () => {
 
     await useCodexStore.getState().subscribe();
     configHandler();
-    expect(useCodexStore.getState().restartRequired).toBe(true);
+    expect(useCodexStore.getState().restartRequired).toBe(false);
+    expect(mocks.listCodexModels).toHaveBeenCalledOnce();
 
     await useCodexStore.getState().restart();
     expect(mocks.restartCodex).toHaveBeenCalledOnce();
@@ -119,5 +120,18 @@ describe("useCodexStore", () => {
     expect(useCodexStore.getState().modelsLoading).toBe(false);
     expect(useCodexStore.getState().modelsError).toBe("Codex 暂时不可用");
     expect(useCodexStore.getState().models).toEqual([]);
+  });
+
+  it("较早请求失败不能覆盖较新请求的成功结果", async () => {
+    let failFirst!: (error: unknown) => void;
+    mocks.listCodexModels.mockReturnValueOnce(new Promise((_, reject) => { failFirst = reject; }));
+    const first = useCodexStore.getState().loadModels();
+    const models = [{ id: "selected-model", model: "selected-model", displayName: "Selected", description: "", isDefault: true, inputModalities: ["text"] }];
+    mocks.listCodexModels.mockResolvedValueOnce(models);
+    await useCodexStore.getState().loadModels();
+    failFirst({ code: "agent_api_failed", message: "旧请求连接失败" });
+    await first;
+    expect(useCodexStore.getState().modelsError).toBeNull();
+    expect(useCodexStore.getState().models).toEqual(models);
   });
 });

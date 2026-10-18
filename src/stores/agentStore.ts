@@ -1,12 +1,15 @@
 import { create } from "zustand";
+import { useAgentDraftStore } from "./agentDraftStore";
 import * as api from "../lib/tauri/conversations";
-import type { CodexItemSummary, CodexStreamEvent, ConversationAttachment, ConversationMetadata, ConversationRecord, ConversationScope, PendingApproval } from "../lib/tauri/conversations";
+import type { CodexItemSummary, CodexStreamEvent, ContextPage, ContextReference, ConversationAttachment, ConversationMetadata, ConversationRecord, ConversationScope, PendingApproval } from "../lib/tauri/conversations";
 
 export type SendMessageOptions = {
   requestText: string;
   displayText?: string;
   selectedText?: string;
   attachments?: ConversationAttachment[];
+  references?: ContextReference[];
+  contextPage?: ContextPage;
   scope?: ConversationScope;
   model?: string | null;
 };
@@ -17,7 +20,7 @@ type AgentStore = {
   queue: Record<string, QueuedMessage[]>;
   queuePaused: Record<string, boolean>;
   resumeQueue: () => void;
-  enqueue: (input: SendMessageOptions) => void;
+  enqueue: (input: SendMessageOptions) => boolean;
   editQueued: (id: string, input: SendMessageOptions) => void;
   removeQueued: (id: string) => void;
   sendNext: () => Promise<void>;
@@ -36,12 +39,13 @@ type AgentStore = {
   initialize: () => Promise<() => void>;
   create: (scope: ConversationScope, title?: string) => Promise<ConversationMetadata | null>;
   open: (id: string) => Promise<void>;
+  removeConversation: (id: string) => Promise<boolean>;
   setSelectedModel: (model: string | null) => void;
   send: (
     input: string | SendMessageOptions,
     defaultScope?: ConversationScope,
     attachments?: ConversationAttachment[],
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   uploadAttachments: (files: File[], defaultScope: ConversationScope) => Promise<ConversationAttachment[]>;
   uploadAttachmentPaths: (paths: string[], defaultScope: ConversationScope) => Promise<ConversationAttachment[]>;
   requestInline: (pageId: string, pageTitle: string, prompt: string) => Promise<string>;
@@ -184,9 +188,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   resumeQueue: () => { const id = get().activeId; if (id) { set((state) => ({ queuePaused: { ...state.queuePaused, [id]: false } })); void get().sendNext(); } },
   enqueue: (input) => {
     const id = get().activeId;
-    if (!id) return;
+    if (!id) return false;
     const queued = { id: crypto.randomUUID(), input: { ...input, model: get().selectedModel } };
     set((state) => ({ queue: { ...state.queue, [id]: [...(state.queue[id] ?? []), queued] } }));
+    return true;
   },
   editQueued: (id, input) => { const active = get().activeId; if (active) set((state) => ({ queue: { ...state.queue, [active]: (state.queue[active] ?? []).map((item) => item.id === id ? { ...item, input: { ...input, model: item.input.model } } : item) } })); },
   removeQueued: (id) => { const active = get().activeId; if (active) set((state) => ({ queue: { ...state.queue, [active]: (state.queue[active] ?? []).filter((item) => item.id !== id) } })); },
@@ -196,7 +201,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const next = state.queue[id]?.[0];
     if (!next) return;
     set({ queue: { ...state.queue, [id]: state.queue[id].slice(1) } });
-    await get().send(next.input);
+    const accepted = await get().send(next.input);
+    if (!accepted) set((current) => ({
+      queue: { ...current.queue, [id]: [next, ...(current.queue[id] ?? [])] },
+      queuePaused: { ...current.queuePaused, [id]: true },
+    }));
   },
   conversations: [],
   activeId: null,
@@ -214,7 +223,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const conversations = await api.listConversations();
     const approvals = await api.listApprovals();
     set({ conversations, approvals });
-    if (!get().activeId && conversations[0]) await get().open(conversations[0].id);
+
     let deltaTimer: ReturnType<typeof setTimeout> | null = null;
     let pending: Extract<CodexStreamEvent, { kind: "agentMessageDelta" }>[] = [];
     const flushDeltas = () => {
@@ -315,8 +324,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
   create: async (scope, title = "新对话") => {
     try {
+      const previousId = get().activeId;
       const model = get().selectedModel;
       const conversation = await api.createConversation(title, scope, model);
+      if (!previousId) useAgentDraftStore.getState().migrateDraft("draft", conversation.id);
+      useAgentDraftStore.getState().setTargetConversation(conversation.id);
       const conversationModels = { ...get().conversationModels, [conversation.id]: model };
       set((state) => ({ conversations: [conversation, ...state.conversations], activeId: conversation.id, selectedModel: model, conversationModels, records: [], streamingText: "", plan: null, diff: "", tools: [], error: null }));
       persistConversationModels(conversationModels);
@@ -326,6 +338,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (get().sending) return;
     try {
       const records = await api.getConversationHistory(id);
+      useAgentDraftStore.getState().setTargetConversation(id);
       const projection = projectConversationHistory(records);
       const model = get().conversationModels[id] ?? null;
       set({ activeId: id, selectedModel: model, records, streamingText: "", ...projection, error: null });
@@ -333,16 +346,36 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       set({ error: errorMessage(error) });
     }
   },
+  removeConversation: async (id) => {
+    if (sendRequestPending) { set({ error: "正在提交消息，请稍后再删除对话" }); return false; }
+    const wasPaused = get().queuePaused[id];
+    set((state) => ({ queuePaused: { ...state.queuePaused, [id]: true } }));
+    try {
+      await api.deleteConversation(id);
+      const { [id]: _model, ...conversationModels } = get().conversationModels;
+      const { [id]: _queue, ...queue } = get().queue;
+      const { [id]: _paused, ...queuePaused } = get().queuePaused;
+      const current = get().activeId === id;
+      if (current) clearActiveTurnTimer();
+      useAgentDraftStore.getState().clearDraft(id);
+      if (current) useAgentDraftStore.getState().setTargetConversation(null);
+      set((state) => ({ conversations: state.conversations.filter((item) => item.id !== id), conversationModels, queue, queuePaused, error: null, ...(current ? { activeId: null, selectedModel: loadStoredDraftModel(), records: [], streamingText: "", plan: null, diff: "", tools: [], approvals: [], sending: false } : {}) }));
+      persistConversationModels(conversationModels);
+      return true;
+    } catch (error) { set((state) => ({ error: errorMessage(error), queuePaused: { ...state.queuePaused, [id]: wasPaused ?? false } })); return false; }
+  },
   send: async (input, defaultScope, attachments = []) => {
-    if (get().sending || sendRequestPending) return;
+    if (get().sending || sendRequestPending) return false;
     sendRequestPending = true;
     set({ sending: true, error: null, plan: null, diff: "", tools: [] });
     activeTurnStopReason = null;
     const isObject = typeof input === "object" && input !== null;
     const requestText = (isObject ? input.requestText : input) || "";
-    const displayText = isObject ? (input.displayText ?? "") : input;
+    const displayText = isObject ? (input.displayText ?? input.requestText) : input;
     const selectedText = isObject ? (input.selectedText ?? "") : "";
     const outgoingAttachments = (isObject ? input.attachments : attachments) ?? [];
+    const references = (isObject ? input.references : []) ?? [];
+    const contextPage = isObject ? input.contextPage : undefined;
     const scope = (isObject ? input.scope : defaultScope) ?? defaultScope ?? { kind: "vault" as const };
 
     let id = get().activeId;
@@ -350,13 +383,15 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const title =
         displayText.trim().slice(0, 24) ||
         outgoingAttachments[0]?.name ||
+        references[0]?.title ||
         (selectedText.trim() ? "选中文本" : "新对话");
       id = (await get().create(scope, title))?.id ?? null;
     }
-    if (!id) { sendRequestPending = false; set({ sending: false }); return; }
+    if (!id) { sendRequestPending = false; set({ sending: false }); return false; }
 
     const model = isObject && input.model !== undefined ? input.model : get().conversationModels[id] ?? get().selectedModel ?? null;
 
+    const previousRecords = get().records;
     set((state) => ({
       sending: true,
       streamingText: "",
@@ -367,6 +402,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           displayText,
           selectedText,
           attachments: outgoingAttachments,
+          references,
+          contextPage,
         }),
       ],
       error: null,
@@ -375,11 +412,13 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     try {
       const turn = await api.sendConversationMessage(
         id,
-        requestText,
+        displayText,
         outgoingAttachments,
         displayText,
         selectedText || undefined,
         model,
+        references,
+        contextPage,
       );
       const stillSending = get().sending;
       set((state) => ({
@@ -391,9 +430,18 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         armActiveTurnTimer(turn.threadId, turn.turnId);
         if (activeTurnStopReason === "user") await get().interrupt();
       }
+      return true;
     } catch (error) {
       clearActiveTurnTimer();
-      set((state) => ({ sending: false, error: errorMessage(error), queuePaused: { ...state.queuePaused, [state.activeId!]: true }, records: [...state.records, record("turnCompleted", { id: state.conversations.find((item) => item.id === id)?.activeTurnId, status: "failed", error: { message: errorMessage(error) } })] }));
+      let history: ConversationRecord[];
+      try { history = await api.getConversationHistory(id); }
+      catch {
+        // 历史读取失败时，已收到的轮次事件说明请求已经被接受。
+        history = get().records.length > previousRecords.length + 1 ? get().records : previousRecords;
+      }
+      const accepted = history.filter((item) => item.kind === "userMessage").length > previousRecords.filter((item) => item.kind === "userMessage").length;
+      set((state) => ({ sending: false, error: errorMessage(error), queuePaused: { ...state.queuePaused, [id]: true }, ...(state.activeId === id ? { records: history, streamingText: "", ...projectConversationHistory(history) } : {}) }));
+      return accepted;
     } finally {
       sendRequestPending = false;
       if (!get().sending) queueMicrotask(() => void get().sendNext());

@@ -1,4 +1,4 @@
-import type { CodexItemSummary, ConversationAttachment, ConversationRecord } from "../../lib/tauri/conversations";
+import type { CodexItemSummary, ContextReference, ConversationAttachment, ConversationRecord } from "../../lib/tauri/conversations";
 
 export type ContextPage = { id: string; title: string };
 export type TimelineMessage = { id: string; text: string; phase?: string | null };
@@ -7,7 +7,7 @@ export type ChangeSnapshot = { pageId: string; title: string; content: string };
 export type TimelineChange = { id: string; tool: string; before?: ChangeSnapshot; after?: ChangeSnapshot; blockId?: string; preview?: string; confirmed: boolean };
 export type TimelineTurn = {
   key: string; turnId?: string; startedAt: number; endedAt?: number;
-  user?: { text: string; selectedText?: string; attachments: ConversationAttachment[]; page?: ContextPage };
+  user?: { text: string; selectedText?: string; attachments: ConversationAttachment[]; page?: ContextPage; references?: ContextReference[] };
   messages: TimelineMessage[]; tools: TimelineTool[]; changes: TimelineChange[];
   plan?: unknown; status: string; error?: string;
 };
@@ -24,7 +24,8 @@ export function userContext(data: Record<string, any>) {
   return {
     text: data.displayText !== undefined ? String(data.displayText) : pieces[0].trim(),
     selectedText: data.selectedText ? String(data.selectedText) : pieces.length > 1 ? pieces[1].replace(/^>\s?/gm, "").trim() : undefined,
-    page: pageMatch ? { title: pageMatch[1], id: pageMatch[2].trim() } : undefined,
+    page: data.contextPage ?? (pageMatch ? { title: pageMatch[1], id: pageMatch[2].trim() } : undefined),
+    references: (data.references ?? []) as ContextReference[],
     attachments: (data.attachments ?? []) as ConversationAttachment[],
   };
 }

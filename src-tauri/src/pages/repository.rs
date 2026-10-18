@@ -680,6 +680,69 @@ impl PageRepository {
         Ok(page)
     }
 
+    pub fn flatten_known_navigation(&self) -> Result<Option<PathBuf>, AppError> {
+        const OUTER: &str = "70eecb99-8dce-42a3-a125-2841a25ea1bd";
+        const INNER: &str = "b9dd1c53-1bae-83a7-9379-810456bce2b2";
+        let _guard = self.lock_writes()?;
+        {
+            let connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
+            let done: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM migration_state WHERE key='flatten_navigation_20261018')", [], |row| row.get(0)).map_err(sqlite_read_error)?;
+            if done { return Ok(None); }
+            let count: i64 = connection.query_row("SELECT COUNT(*) FROM pages WHERE id IN (?1,?2)", params![OUTER, INNER], |row| row.get(0)).map_err(sqlite_read_error)?;
+            if count == 0 { return Ok(None); }
+            if count != 2 { return Err(AppError::new("navigation_migration_changed", "导航目录结构已变化，未执行目录整理")); }
+        }
+        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let backup = base.join("Qingyu").join("recovery").join(format!("navigation-{}", Uuid::new_v4())).join("qingyu-before-flatten.sqlite3");
+        self.snapshot_database(&backup)?;
+        let mut connection = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?;
+        let transaction = connection.transaction().map_err(sqlite_write_error)?;
+        let outer = load_page(&transaction, OUTER)?;
+        let inner = load_page(&transaction, INNER)?;
+        let invalid = || AppError::new("navigation_migration_changed", "导航目录或正文已变化，原数据保留，请检查后再整理");
+        if outer.title != "私人与共享" || outer.parent_id.is_some() || inner.title != "分享" || inner.parent_id.as_deref() != Some(OUTER) || outer.trashed_at.is_some() || inner.trashed_at.is_some() { return Err(invalid()); }
+        let children = {
+            let mut statement = transaction.prepare("SELECT id FROM pages WHERE parent_id=?1 ORDER BY sort_order,title,id").map_err(sqlite_read_error)?;
+            let rows = statement.query_map([INNER], |row| row.get::<_, String>(0)).map_err(sqlite_read_error)?;
+            rows.collect::<Result<Vec<_>,_>>().map_err(sqlite_read_error)?
+        };
+        let outer_children: i64 = transaction.query_row("SELECT COUNT(*) FROM pages WHERE parent_id=?1", [OUTER], |row| row.get(0)).map_err(sqlite_read_error)?;
+        let attachments: i64 = transaction.query_row("SELECT COUNT(*) FROM attachments WHERE page_id IN (?1,?2)", params![OUTER, INNER], |row| row.get(0)).map_err(sqlite_read_error)?;
+        if children.len() != 12 || outer_children != 1 || attachments != 0 { return Err(invalid()); }
+        // 两个外壳只能包含已核实的子页面导航，不删除新增正文。
+        for (page, allowed) in [(&outer, vec![INNER.to_owned()]), (&inner, children.clone())] {
+            for line in page.content.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                if line.starts_with("<!-- qy:block:") && line.ends_with("-->") { continue; }
+                let link = line.strip_prefix('[').and_then(|line| line.split_once("](qingyu://page/")).and_then(|(_, rest)| rest.strip_suffix(')'));
+                if !link.is_some_and(|id| allowed.iter().any(|allowed| allowed == id)) { return Err(invalid()); }
+            }
+        }
+        let roots = {
+            let mut statement = transaction.prepare("SELECT id FROM pages WHERE parent_id IS NULL ORDER BY sort_order,title,id").map_err(sqlite_read_error)?;
+            let rows = statement.query_map([], |row| row.get::<_,String>(0)).map_err(sqlite_read_error)?;
+            rows.collect::<Result<Vec<_>,_>>().map_err(sqlite_read_error)?
+        };
+        let mut ordered = Vec::new();
+        for root in roots { if root == OUTER { ordered.extend(children.iter().cloned()); } else { ordered.push(root); } }
+        for (index, id) in ordered.iter().enumerate() {
+            transaction.execute("UPDATE pages SET sort_order=?1 WHERE id=?2", params![index as i64,id]).map_err(sqlite_write_error)?;
+        }
+        for id in &children {
+            let mut page = load_page(&transaction, id)?;
+            let mut document = load_document(&transaction, &page)?;
+            page.parent_id = None; page.updated_at = now(); document.revision += 1;
+            update_page_row(&transaction, &page, document.revision)?;
+            record_revision_document(&transaction, &page, &document, "flatten_navigation")?;
+        }
+        transaction.execute("DELETE FROM blocks_fts WHERE page_id IN (?1,?2)", params![OUTER,INNER]).map_err(sqlite_write_error)?;
+        // 子页面已提升完毕，仅删除两个外壳，不调用递归删除。
+        transaction.execute("DELETE FROM pages WHERE id=?1", [INNER]).map_err(sqlite_write_error)?;
+        transaction.execute("DELETE FROM pages WHERE id=?1", [OUTER]).map_err(sqlite_write_error)?;
+        transaction.execute("INSERT OR REPLACE INTO migration_state(key,completed_at) VALUES('flatten_navigation_20261018',?1)", [now()]).map_err(sqlite_write_error)?;
+        transaction.commit().map_err(sqlite_write_error)?;
+        Ok(Some(backup))
+    }
+
     pub fn snapshot_database(&self, destination: &Path) -> Result<(), AppError> {
         if destination.exists() {
             fs::remove_file(destination)
@@ -930,8 +993,11 @@ impl PageRepository {
             .unwrap_or(&self.root)
             .join("attachments")
             .join(page_id);
+        let data_root = self.root.parent().unwrap_or(&self.root);
+        crate::safe_path::check_inside(data_root, &directory)?;
         fs::create_dir_all(&directory)
             .map_err(|error| AppError::new("asset_write_failed", error.to_string()))?;
+        crate::safe_path::check_inside(data_root, &directory)?;
         let file_name = format!("{}.{}", Uuid::new_v4(), extension);
         let destination = directory.join(&file_name);
         let temporary = directory.join(format!("{}.tmp", Uuid::new_v4()));
@@ -970,15 +1036,13 @@ impl PageRepository {
             .ok_or_else(|| AppError::new("asset_invalid_path", "附件路径不安全"))?;
         Uuid::parse_str(stem).map_err(|_| AppError::new("asset_invalid_path", "附件路径不安全"))?;
         let _ = self.get(page_id, false)?;
-        let bytes = fs::read(
-            self.root
-                .parent()
-                .unwrap_or(&self.root)
-                .join("attachments")
-                .join(page_id)
-                .join(parts[3]),
-        )
-        .map_err(|error| AppError::new("asset_not_found", error.to_string()))?;
+        let registered_path = format!("attachments/{page_id}/{}", parts[3]);
+        let registered: bool = self.connection.lock().map_err(|_| AppError::new("sqlite_lock_failed", "数据库锁已损坏"))?
+            .query_row("SELECT EXISTS(SELECT 1 FROM attachments WHERE page_id=?1 AND relative_path=?2)", params![page_id, registered_path], |row| row.get(0)).map_err(sqlite_read_error)?;
+        if !registered { return Err(AppError::new("asset_not_found", "附件尚未登记")); }
+        let data_root = self.root.parent().unwrap_or(&self.root);
+        let path = crate::safe_path::existing_inside(data_root, &data_root.join(&registered_path))?;
+        let bytes = fs::read(path).map_err(|error| AppError::new("asset_not_found", error.to_string()))?;
         if bytes.len() > 100 * 1024 * 1024 {
             return Err(AppError::new("asset_too_large", "附件不能超过 100 MiB"));
         }
@@ -1595,7 +1659,7 @@ fn update_page_row(
     Ok(())
 }
 
-fn load_page(connection: &Connection, id: &str) -> Result<Page, AppError> {
+pub(crate) fn load_page(connection: &Connection, id: &str) -> Result<Page, AppError> {
     connection.query_row(
         "SELECT id,title,parent_id,kind,created_at,updated_at,trashed_at,sort_order,properties_json,database_id FROM pages WHERE id=?1",
         [id], |row| {

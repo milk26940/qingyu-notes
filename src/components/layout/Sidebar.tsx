@@ -1,6 +1,9 @@
 import { FileText, Search } from "lucide-react";
 import { PageTree } from "../pages/PageTree";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import { useSessionStore } from "../../stores/sessionStore";
+import { usePagesStore } from "../../stores/pagesStore";
 
 const items = [
   [Search, "搜索"],
@@ -18,11 +21,14 @@ export function Sidebar({
   onNavigate?: (label: SidebarNav) => void;
   onOpenPage?: (pageId: string) => void;
 }) {
+  const scroller = useRef<HTMLDivElement>(null);
+  const sessionVault = useSessionStore((state) => state.vault);
+  useEffect(() => { if (scroller.current) scroller.current.scrollTop = useSessionStore.getState().treeScroll; }, [sessionVault]);
   const [selectedNav, setSelectedNav] = useState<SidebarNav>("页面");
   const currentNav = activeNav ?? selectedNav;
   return (
     <aside
-      className="flex min-h-0 flex-col overflow-hidden rounded-[22px] border border-white bg-[var(--qy-sidebar)] px-3 py-4 shadow-[var(--qy-panel-shadow)]"
+      className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[22px] border border-white bg-[var(--qy-sidebar)] px-3 py-4 shadow-[var(--qy-panel-shadow)]"
       aria-label="工作区导航"
     >
       <div className="mb-5 h-7" aria-hidden="true" />
@@ -43,7 +49,7 @@ export function Sidebar({
           </button>
         ))}
       </nav>
-      <div aria-label="页面树滚动区域" className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
+      <div ref={scroller} onScroll={(event) => { const session = useSessionStore.getState(); if (session.vault === usePagesStore.getState().readyVaultPath) session.setTreeScroll(event.currentTarget.scrollTop); }} aria-label="页面树滚动区域" className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
         <PageTree onOpen={onOpenPage} />
       </div>
     </aside>

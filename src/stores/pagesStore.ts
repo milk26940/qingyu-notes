@@ -23,17 +23,20 @@ type PagesStore = {
   projectionStatus: ProjectionStatus;
   setProjectionStatus: (status: ProjectionStatus) => void;
   reportError: (message: string) => void;
+  readyVaultPath: string | null;
   init: (path?: string) => Promise<void>;
   refresh: () => Promise<void>;
   open: (id: string, targetBlockId?: string | null) => Promise<void>;
   reload: (id: string) => Promise<void>;
   prefetch: (id: string) => void;
   create: (title?: string, parentId?: string | null) => Promise<void>;
+  createEditorChild: (kind: "page" | "database") => Promise<Page | null>;
   createLinkedChild: (kind: "page" | "database", position: number) => Promise<void>;
   edit: (content: string) => void;
   editDocument: (document: PageDocument) => void;
   editTitle: (title: string) => void;
   save: () => Promise<void>;
+  flush: () => Promise<boolean>;
   move: (id: string, parentId: string | null, sortOrder?: number) => Promise<void>;
   trashPage: (id: string) => Promise<void>;
   trashPageRecursive: (id: string) => Promise<void>;
@@ -103,6 +106,7 @@ const flushPendingSave = async (get: () => PagesStore) => {
 };
 
 export const usePagesStore = create<PagesStore>((set, get) => ({
+  readyVaultPath: null,
   openingPageId: null,
   vaultPath: null, pages: [], trash: [], activePage: null, activeDocument: null, persistedPage: null, targetBlockId: null, links: [], backlinks: [], history: [], searchResults: [], searchQuery: "", saveState: "idle", error: null, projectionStatus: { state: "initializing" },
   setProjectionStatus: (projectionStatus) => set({ projectionStatus }),
@@ -111,13 +115,14 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     const currentPath = get().vaultPath;
     if (currentPath && path && path !== currentPath && !(await flushPendingSave(get))) return;
     try {
-      set({ projectionStatus: { state: "initializing" } });
+      set({ readyVaultPath: null, projectionStatus: { state: "initializing" } });
       const vaultPath = await api.initVault(path);
       invalidateBundles();
       openSequence++;
       searchSequence++;
       set({ vaultPath, pages: [], trash: [], activePage: null, activeDocument: null, persistedPage: null, targetBlockId: null, links: [], backlinks: [], history: [], searchResults: [], searchQuery: "", saveState: "idle", error: null, projectionStatus: { state: "ready" } });
       await get().refresh();
+      set({ readyVaultPath: vaultPath });
     } catch (error) {
       set({ error: failure(error) });
     }
@@ -164,6 +169,16 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     } catch (error) { set({ error: failure(error) }); }
   },
   create: async (title = "未命名页面", parentId = null) => { if (!(await flushPendingSave(get))) return; try { const page = await api.createPage(title, parentId, ""); const bundle = await api.openPageBundle(page.id); set({ activePage: bundle.page, activeDocument: bundle.document, persistedPage: bundle.page, links: bundle.links, backlinks: bundle.backlinks, saveState: "saved", error: null }); await get().refresh(); } catch (error) { set({ error: failure(error) }); } },
+  createEditorChild: async (kind) => {
+    if (!(await flushPendingSave(get))) return null;
+    const parent = get().activePage;
+    if (!parent || parent.kind === "database") return null;
+    try {
+      const child = kind === "database" ? (await databaseApi.createDatabase("未命名数据库", parent.id)).page : await api.createPage("未命名页面", parent.id, "");
+      await get().refresh();
+      return child;
+    } catch (error) { set({ error: failure(error) }); return null; }
+  },
   createLinkedChild: async (kind, position) => {
     if (!(await flushPendingSave(get))) return;
     const parent = get().activePage;
@@ -192,6 +207,7 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
   edit: (content) => { set((state) => state.activePage ? { activePage: { ...state.activePage, content }, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state); if (get().saveState === "dirty") scheduleAutoSave(get().save); },
   editDocument: (document) => { set((state) => state.activePage ? { activeDocument: document, activePage: { ...state.activePage, content: document.blocks.map((block) => block.text).filter(Boolean).join("\n") }, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state); if (get().saveState === "dirty") scheduleAutoSave(get().save); },
   editTitle: (title) => { set((state) => state.activePage ? { activePage: { ...state.activePage, title }, activeDocument: state.activeDocument ? { ...state.activeDocument, title } : null, saveState: state.saveState === "conflict" ? "conflict" : "dirty" } : state); if (get().saveState === "dirty") scheduleAutoSave(get().save); },
+  flush: () => flushPendingSave(get),
   save: () => {
     cancelAutoSave();
     if (saveInFlight) return saveInFlight;

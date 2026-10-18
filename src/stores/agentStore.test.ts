@@ -92,6 +92,20 @@ describe("useAgentStore", () => {
     expect(useAgentStore.getState().queue.queue).toHaveLength(1);
   });
 
+  it("队列准备失败保留待发项目并恢复历史，重试接受后才出队", async () => {
+    useAgentStore.setState({ activeId: "queue", records: [] });
+    api.sendConversationMessage.mockRejectedValueOnce(new Error("密钥未配置"));
+    useAgentStore.getState().enqueue({ requestText: "保留这条消息" });
+    await useAgentStore.getState().sendNext();
+    expect(useAgentStore.getState().queue.queue).toHaveLength(1);
+    expect(useAgentStore.getState().records).toEqual([]);
+    api.sendConversationMessage.mockResolvedValue({ threadId: "thread", turnId: "retry" });
+    useAgentStore.setState({ queuePaused: {} });
+    await useAgentStore.getState().sendNext();
+    expect(useAgentStore.getState().queue.queue).toHaveLength(0);
+    expect(useAgentStore.getState().records.filter((item) => item.kind === "userMessage")).toHaveLength(1);
+  });
+
   it("区分上游失败和主动中止", async () => {
     let eventHandler: (event: any) => void = () => undefined;
     api.subscribeConversationEvents.mockImplementation(async (handler) => { eventHandler = handler; return () => undefined; });
@@ -183,11 +197,13 @@ describe("useAgentStore", () => {
     expect(api.createConversation).toHaveBeenCalledWith("附件.pdf", { kind: "vault" }, null);
     expect(api.sendConversationMessage).toHaveBeenCalledWith(
       "conv-created",
-      "上下文内容",
+      "",
       expect.any(Array),
       "",
       undefined,
       null,
+      [],
+      undefined,
     );
     const record = useAgentStore.getState().records[0];
     expect(record.data.displayText).toBe("");
@@ -224,6 +240,8 @@ describe("useAgentStore", () => {
       "你好",
       undefined,
       "gpt-4o",
+      [],
+      undefined,
     );
 
     // 切换到另一个已有对话，模型选择同步切换

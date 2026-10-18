@@ -1,27 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{oneshot, Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 
-#[cfg(windows)]
-use super::command::codex_creation_flags;
-use super::command::resolve_codex_launch;
 use super::conversation::{ConversationAttachment, ConversationStore};
-use super::protocol::{
-    initialize_request, parse_initialize_response, parse_rpc_message, qingyu_dynamic_tools,
-    rpc_notification, rpc_request, rpc_response, CodexEvent, CodexInitializeResult,
-    CodexServerRequest, RpcMessage,
-};
+use super::protocol::{qingyu_dynamic_tools, CodexEvent};
 use crate::backup::model::BackupScope;
 use crate::backup::repository::BackupRepository;
 use crate::database::model::{DatabaseDefinition, DatabaseFieldType};
@@ -30,7 +19,8 @@ use crate::error::AppError;
 use crate::pages::model::{BlockNode, Page, PageLink};
 use crate::pages::repository::PageRepository;
 
-type PendingResponse = oneshot::Sender<Result<Value, AppError>>;
+#[path = "native.rs"]
+mod native;
 
 fn find_block<'a>(blocks: &'a [BlockNode], id: &str) -> Option<&'a BlockNode> {
     blocks.iter().find_map(|block| {
@@ -193,29 +183,18 @@ pub struct CodexModelOption {
     pub input_modalities: Vec<String>,
 }
 
-struct CodexProcess {
-    child: Child,
-    stdin: Arc<Mutex<ChildStdin>>,
-    reader_task: JoinHandle<()>,
-}
-
-impl Drop for CodexProcess {
-    fn drop(&mut self) {
-        self.reader_task.abort();
-        let _ = self.child.start_kill();
-    }
+struct ActiveTurn {
+    thread_id: String,
+    cancel: CancellationToken,
 }
 
 #[derive(Clone)]
 pub struct CodexRuntime {
     status: Arc<RwLock<CodexStatus>>,
-    process: Arc<Mutex<Option<CodexProcess>>>,
-    pending: Arc<Mutex<HashMap<i64, PendingResponse>>>,
-    next_id: Arc<AtomicI64>,
     pages: Arc<RwLock<Option<PageRepository>>>,
     conversations: Arc<RwLock<Option<ConversationStore>>>,
-    approvals: Arc<Mutex<HashMap<String, PendingApproval>>>,
-    lifecycle: Arc<Mutex<()>>,
+    active: Arc<Mutex<HashMap<String, ActiveTurn>>>,
+    instructions: Arc<RwLock<HashMap<String, String>>>,
     generation: Arc<AtomicU64>,
     vault_root: Arc<RwLock<Option<String>>>,
 }
@@ -224,13 +203,10 @@ impl Default for CodexRuntime {
     fn default() -> Self {
         Self {
             status: Arc::new(RwLock::new(CodexStatus::Stopped)),
-            process: Arc::new(Mutex::new(None)),
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Arc::new(AtomicI64::new(1)),
             pages: Arc::new(RwLock::new(None)),
             conversations: Arc::new(RwLock::new(None)),
-            approvals: Arc::new(Mutex::new(HashMap::new())),
-            lifecycle: Arc::new(Mutex::new(())),
+            active: Arc::new(Mutex::new(HashMap::new())),
+            instructions: Arc::new(RwLock::new(HashMap::new())),
             generation: Arc::new(AtomicU64::new(0)),
             vault_root: Arc::new(RwLock::new(None)),
         }
@@ -238,586 +214,110 @@ impl Default for CodexRuntime {
 }
 
 impl CodexRuntime {
-    pub async fn status(&self) -> CodexStatus {
-        self.status.read().await.clone()
-    }
+    pub async fn status(&self) -> CodexStatus { self.status.read().await.clone() }
 
-    pub async fn configure_vault(
-        &self,
-        pages: PageRepository,
-    ) -> Result<ConversationStore, AppError> {
-        let store = ConversationStore::open(pages.root())?;
+    pub async fn configure_vault(&self, pages: PageRepository) -> Result<ConversationStore, AppError> {
         let root = pages.root().to_string_lossy().to_string();
-        let changed = self.vault_root.read().await.as_deref() != Some(root.as_str());
-        if changed {
-            self.approvals.lock().await.clear();
-            *self.vault_root.write().await = Some(root);
+        let mut current = self.vault_root.write().await;
+        if current.as_deref() != Some(&root) {
+            for turn in self.active.lock().await.values() { turn.cancel.cancel(); }
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.instructions.write().await.clear();
+            *current = Some(root);
         }
+        let store = ConversationStore::open(pages.root())?;
         *self.pages.write().await = Some(pages);
         *self.conversations.write().await = Some(store.clone());
-        if changed && matches!(*self.status.read().await, CodexStatus::Ready { .. }) {
-            self.resume_registered_threads().await;
-        }
         Ok(store)
     }
 
     pub async fn start(&self, app: &AppHandle) -> Result<CodexStatus, AppError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        if matches!(
-            *self.status.read().await,
-            CodexStatus::Ready { .. } | CodexStatus::Starting
-        ) {
-            return Ok(self.status().await);
-        }
-        self.set_status(app, CodexStatus::Starting).await;
-        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let launch = resolve_codex_launch().inspect_err(|error| {
-            let failure = error.clone();
-            let status = self.status.clone();
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                *status.write().await = CodexStatus::Failed {
-                    code: failure.code.clone(),
-                    message: failure.message.clone(),
-                };
-                let _ = app.emit("codex://status", status.read().await.clone());
-            });
-        })?;
-        let mut command = Command::new(launch.program);
-        command
-            .args(launch.prefix_args)
-            .args(codex_app_server_args())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        #[cfg(windows)]
-        command.creation_flags(codex_creation_flags());
-        let mut child = command
-            .spawn()
-            .map_err(|error| AppError::new("codex_start_failed", error.to_string()))?;
-        let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or_else(|| {
-            AppError::new("codex_start_failed", "无法打开 Codex 标准输入")
-        })?));
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AppError::new("codex_start_failed", "无法打开 Codex 标准输出"))?;
-        let mut reader = BufReader::new(stdout);
-        write_json(&stdin, &initialize_request(0)).await?;
-        write_json(&stdin, &rpc_notification("initialized", json!({}))).await?;
-        let mut line = String::new();
-        tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
-            .await
-            .map_err(|_| AppError::new("codex_handshake_timeout", "Codex 初始化超时"))?
-            .map_err(|error| AppError::new("codex_handshake_failed", error.to_string()))?;
-        let result: CodexInitializeResult = parse_initialize_response(line.trim_end())?;
-
-        let runtime = self.clone();
-        let event_app = app.clone();
-        let reader_stdin = stdin.clone();
-        let reader_task = tokio::spawn(async move {
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        runtime
-                            .route_message(&event_app, &reader_stdin, line.trim_end())
-                            .await
-                    }
-                }
-            }
-            if runtime.generation.load(Ordering::SeqCst) == generation {
-                runtime.fail_pending("Codex App Server 已断开").await;
-                runtime.approvals.lock().await.clear();
-                runtime
-                    .set_status(
-                        &event_app,
-                        CodexStatus::Failed {
-                            code: "codex_disconnected".into(),
-                            message: "Codex App Server 已断开，正在等待重连".into(),
-                        },
-                    )
-                    .await;
-            }
-        });
-        *self.process.lock().await = Some(CodexProcess {
-            child,
-            stdin,
-            reader_task,
-        });
-        self.set_status(
-            app,
-            CodexStatus::Ready {
-                user_agent: result.user_agent,
-                codex_home: result.codex_home,
-            },
-        )
-        .await;
-        self.resume_registered_threads().await;
-        Ok(self.status().await)
+        let settings = super::settings::get()?;
+        let status = if settings.base_url.is_empty() {
+            CodexStatus::Failed { code: "agent_not_configured".into(), message: "请先配置内置 Agent 的 API 地址、Key 和模型".into() }
+        } else {
+            CodexStatus::Ready { user_agent: "轻羽内置 Agent · Rig 0.44.0".into(), codex_home: settings.workspace_root }
+        };
+        self.set_status(app, status.clone()).await;
+        Ok(status)
     }
 
     pub async fn stop(&self, app: &AppHandle) -> Result<CodexStatus, AppError> {
-        let _lifecycle = self.lifecycle.lock().await;
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Some(mut process) = self.process.lock().await.take() {
-            process.reader_task.abort();
-            process
-                .child
-                .kill()
-                .await
-                .map_err(|error| AppError::new("codex_stop_failed", error.to_string()))?;
-            let _ = process.child.wait().await;
-        }
-        self.fail_pending("Codex 已停止").await;
-        self.approvals.lock().await.clear();
+        for turn in self.active.lock().await.values() { turn.cancel.cancel(); }
         self.set_status(app, CodexStatus::Stopped).await;
         Ok(CodexStatus::Stopped)
     }
 
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value, AppError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let stdin = self.stdin().await?;
-        let (sender, receiver) = oneshot::channel();
-        self.pending.lock().await.insert(id, sender);
-        if let Err(error) = write_json(&stdin, &rpc_request(id, method, params)).await {
-            self.pending.lock().await.remove(&id);
-            return Err(error);
-        }
-        match tokio::time::timeout(Duration::from_secs(60), receiver).await {
-            Ok(result) => result
-                .map_err(|_| AppError::new("codex_request_cancelled", "Codex 请求通道已关闭"))?,
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                Err(AppError::new(
-                    "codex_request_timeout",
-                    format!("{} 请求超时", method),
-                ))
-            }
-        }
-    }
-
     pub async fn list_models(&self) -> Result<Vec<CodexModelOption>, AppError> {
-        let mut models = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let result = self
-                .request(
-                    "model/list",
-                    json!({ "cursor": cursor, "limit": 100, "includeHidden": false }),
-                )
-                .await?;
-            let page = result
-                .get("data")
-                .cloned()
-                .ok_or_else(|| AppError::new("codex_invalid_models", "Codex 未返回模型列表"))?;
-            models.extend(
-                serde_json::from_value::<Vec<CodexModelOption>>(page)
-                    .map_err(|error| AppError::new("codex_invalid_models", error.to_string()))?,
-            );
-            cursor = result
-                .get("nextCursor")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            if cursor.is_none() {
-                break;
+        let connection = super::settings::connection(None)?;
+        let result = match connection.client.list_models().await {
+            Err(rig_core::error::ProviderError::Http(_)) => {
+                // 模型列表是只读请求，仅为临时传输故障重试一次；认证和接口错误直接返回。
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                connection.client.list_models().await
             }
+            result => result,
+        };
+        let models = result.map_err(|error| super::settings::model_error(error, &connection.api_key))?;
+        let mut options = models.into_iter().map(|model| CodexModelOption {
+            display_name: model.display_name().to_owned(), description: model.description.unwrap_or_default(),
+            is_default: model.id == connection.model, id: model.id.clone(), model: model.id,
+            input_modalities: vec!["text".into()],
+        }).collect::<Vec<_>>();
+        // 自定义部署可能不在列表里；保留用户配置的模型名，不替换成其他模型。
+        if !connection.model.is_empty() && !options.iter().any(|item| item.model == connection.model) {
+            options.insert(0, CodexModelOption { id: connection.model.clone(), model: connection.model.clone(), display_name: connection.model, description: "手动配置的默认模型".into(), is_default: true, input_modalities: vec!["text".into()] });
         }
-        Ok(models)
+        Ok(options)
     }
 
-    pub async fn start_thread(
-        &self,
-        cwd: &Path,
-        scope_instruction: &str,
-        model: Option<&str>,
-    ) -> Result<String, AppError> {
-        let result = match self
-            .request(
-                "thread/start",
-                thread_start_params(cwd, scope_instruction, model, true),
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(error) if dynamic_tools_unavailable(&error) => {
-                self.request(
-                    "thread/start",
-                    thread_start_params(cwd, scope_instruction, model, false),
-                )
-                .await?
-            }
-            Err(error) => return Err(error),
-        };
-        result
-            .pointer("/thread/id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| AppError::new("codex_invalid_thread", "Codex 未返回 threadId"))
+    pub async fn start_thread(&self, _cwd: &Path, instructions: &str, _model: Option<&str>) -> Result<String, AppError> {
+        let id = format!("rig-{}", uuid::Uuid::new_v4());
+        self.instructions.write().await.insert(id.clone(), instructions.to_owned());
+        Ok(id)
     }
 
     pub async fn resume_thread(&self, thread_id: &str, instructions: Option<&str>) -> Result<(), AppError> {
-        let mut params = json!({ "threadId": thread_id });
-        if let Some(instructions) = instructions {
-            params["developerInstructions"] = json!(instructions);
-        }
-        self.request("thread/resume", params)
-            .await
-            .map(|_| ())
+        // 旧线程 ID 仅作为本地对话标识使用，不连接旧的外部运行时。
+        if let Some(instructions) = instructions { self.instructions.write().await.insert(thread_id.into(), instructions.into()); }
+        Ok(())
     }
 
-    pub async fn start_turn(
-        &self,
-        thread_id: &str,
-        text: &str,
-        cwd: &Path,
-        attachments: &[ConversationAttachment],
-        model: Option<&str>,
-    ) -> Result<String, AppError> {
-        let mut input = vec![json!({ "type": "text", "text": text })];
-        if let Some(store) = self.conversations.read().await.clone() {
-            for attachment in attachments.iter().filter(|attachment| attachment.mime.starts_with("image/")) {
-                let path = store.attachment_path(&attachment.relative_path)?;
-                input.push(json!({ "type": "localImage", "path": path.to_string_lossy() }));
+    pub async fn start_turn(&self, app: &AppHandle, thread_id: &str, text: &str, _cwd: &Path, attachments: &[ConversationAttachment], model: Option<&str>, user_data: Value) -> Result<String, AppError> {
+        self.launch_turn(app, thread_id, text, attachments, model, user_data).await
+    }
+
+    pub async fn delete_conversation(&self, store: &ConversationStore, id: &str) -> Result<(), AppError> {
+        let conversation = store.get(id)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let active = self.active.lock().await;
+            let turns = active.values().filter(|turn| Some(turn.thread_id.as_str()) == conversation.thread_id.as_deref()).collect::<Vec<_>>();
+            if turns.is_empty() {
+                // 同启动执行共用互斥锁，删除期间不能再启动新任务。
+                store.set_active_turn(id, None)?;
+                return store.delete(id);
             }
+            for turn in turns { turn.cancel.cancel(); }
+            drop(active);
+            if tokio::time::Instant::now() >= deadline { return Err(AppError::new("conversation_stop_timeout", "仍在等待当前操作结束，对话尚未删除，请稍后重试")); }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let mut params = json!({
-            "threadId": thread_id, "input": input,
-            "cwd": cwd.to_string_lossy(), "approvalPolicy": "never",
-            "sandboxPolicy": { "type": "readOnly", "networkAccess": false }
-        });
-        if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
-            params["model"] = json!(model);
-        }
-        let result = self
-            .request(
-                "turn/start",
-                params,
-            )
-            .await;
-        let result = result?;
-        result
-            .pointer("/turn/id")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| AppError::new("codex_invalid_turn", "Codex 未返回 turnId"))
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str, turn_id: &str) -> Result<(), AppError> {
-        self.request(
-            "turn/interrupt",
-            json!({ "threadId": thread_id, "turnId": turn_id }),
-        )
-        .await
-        .map(|_| ())
+        if let Some(turn) = self.active.lock().await.get(turn_id).filter(|turn| turn.thread_id == thread_id) { turn.cancel.cancel(); }
+        Ok(())
     }
 
-    pub async fn approvals(&self) -> Vec<PendingApproval> {
-        self.approvals.lock().await.values().cloned().collect()
+    pub async fn approvals(&self) -> Vec<PendingApproval> { Vec::new() }
+    pub async fn resolve_approval(&self, _app: &AppHandle, _id: &str, _approved: bool) -> Result<(), AppError> {
+        Err(AppError::new("approval_not_found", "内置 Agent 默认自动执行，没有待处理审批"))
     }
 
-    pub async fn resolve_approval(
-        &self,
-        app: &AppHandle,
-        id: &str,
-        approved: bool,
-    ) -> Result<(), AppError> {
-        let approval = self
-            .approvals
-            .lock()
-            .await
-            .remove(id)
-            .ok_or_else(|| AppError::new("approval_not_found", "审批请求不存在"))?;
-        let current_generation = self.generation.load(Ordering::SeqCst);
-        let current_root = self.vault_root.read().await.clone().unwrap_or_default();
-        if !approval_matches(&approval, current_generation, &current_root) {
-            return Err(AppError::new(
-                "approval_stale",
-                "审批所属连接或笔记库已变化，请重新发起操作",
-            ));
-        }
-        let stdin = self.stdin().await?;
-        let before = self.change_snapshot(&approval.namespace, &approval.arguments).await;
-        let result = if approved {
-            let pages = self
-                .pages
-                .read()
-                .await
-                .clone()
-                .ok_or_else(|| AppError::new("vault_not_initialized", "笔记库尚未初始化"));
-            match pages.and_then(|pages| {
-                BackupRepository::open(pages.root())?
-                    .checkpoint(BackupScope::Vault, "agentDangerousWrite")
-            }) {
-                Ok(_) => {
-                    self.execute_tool(&approval.namespace, &approval.tool, &approval.arguments)
-                        .await
-                }
-                Err(error) => Err(AppError::new(
-                    "agent_backup_failed",
-                    format!("危险操作已阻止：备份失败：{}", error.message),
-                )),
-            }
-        } else {
-            Err(AppError::new("tool_rejected", "用户拒绝了此操作"))
-        };
-        if let Some(store) = self.conversations.read().await.clone() {
-            let _ = store.append_approval(
-                &approval.thread_id,
-                &approval.id,
-                &approval.namespace,
-                &approval.tool,
-                &approval.diff,
-                Some(approved),
-            );
-            let _ = store.append_tool_outcome(
-                &approval.thread_id,
-                &approval.id,
-                &approval.namespace,
-                &approval.tool,
-                result.is_ok(),
-            );
-            if result.is_ok() {
-                let _ = store.append_change_summary(
-                    &approval.thread_id,
-                    &approval.id,
-                    &approval.namespace,
-                    &approval.tool,
-                    &approval.diff,
-                );
-            }
-        }
-        self.finish_activity(app, &approval.thread_id, &approval.turn_id, &approval.id, &approval.namespace, &approval.tool, &approval.arguments, before, &result).await;
-        if result.is_ok() {
-            emit_vault_change(
-                app,
-                &approval.namespace,
-                &approval.tool,
-                &approval.arguments,
-            );
-        }
-        write_tool_result(&stdin, approval.request_id, result).await
-    }
-
-    async fn stdin(&self) -> Result<Arc<Mutex<ChildStdin>>, AppError> {
-        self.process
-            .lock()
-            .await
-            .as_ref()
-            .map(|process| process.stdin.clone())
-            .ok_or_else(|| AppError::new("codex_not_running", "Codex 尚未连接"))
-    }
-
-    async fn route_message(&self, app: &AppHandle, stdin: &Arc<Mutex<ChildStdin>>, line: &str) {
-        match parse_rpc_message(line) {
-            Ok(RpcMessage::Response { id, result, error }) => {
-                if let Some(sender) = self.pending.lock().await.remove(&id) {
-                    let value = match error {
-                        Some(error) => Err(AppError::new("codex_rpc_error", error.message)),
-                        None => Ok(result.unwrap_or_else(|| json!({}))),
-                    };
-                    let _ = sender.send(value);
-                }
-            }
-            Ok(RpcMessage::Event(event)) => {
-                if let Some(thread_id) = event.thread_id() {
-                    if let Some(store) = self.conversations.read().await.clone() {
-                        if let Err(error) = store.append_event(thread_id, &event) {
-                            let _ = app.emit("codex://persistence-error", error);
-                        }
-                        match &event {
-                            CodexEvent::TurnStarted { turn, .. } => {
-                                if let Err(error) = store.set_active_turn_for_thread(
-                                    thread_id,
-                                    turn.get("id").and_then(Value::as_str).map(str::to_owned),
-                                ) {
-                                    let _ = app.emit("codex://persistence-error", error);
-                                }
-                            }
-                            CodexEvent::TurnCompleted { .. } => {
-                                if let Err(error) =
-                                    store.set_active_turn_for_thread(thread_id, None)
-                                {
-                                    let _ = app.emit("codex://persistence-error", error);
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                let _ = app.emit("codex://event", event);
-            }
-            Ok(RpcMessage::ServerRequest(request)) => {
-                self.handle_server_request(app, stdin, request).await
-            }
-            Err(error) => {
-                let _ = app.emit("codex://warning", error);
-            }
-        }
-    }
-
-    async fn handle_server_request(
-        &self,
-        app: &AppHandle,
-        stdin: &Arc<Mutex<ChildStdin>>,
-        request: CodexServerRequest,
-    ) {
-        if request.method != "item/tool/call" {
-            let _ = write_tool_result(
-                stdin,
-                request.id,
-                Err(AppError::new(
-                    "unsupported_server_request",
-                    "轻羽不支持此服务端请求",
-                )),
-            )
-            .await;
-            return;
-        }
-        let namespace = request
-            .params
-            .get("namespace")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let tool = request
-            .params
-            .get("tool")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let mut arguments = request
-            .params
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
-        if is_dangerous(&namespace, &tool) {
-            if let Some(pages) = self.pages.read().await.clone() {
-                if let Err(error) =
-                    attach_approval_baseline(&pages, &namespace, &tool, &mut arguments)
-                {
-                    let _ = write_tool_result(stdin, request.id, Err(error)).await;
-                    return;
-                }
-            }
-        }
-        let call_id = request
-            .params
-            .get("callId")
-            .and_then(Value::as_str)
-            .unwrap_or("tool-call")
-            .to_owned();
-        let thread_id = request
-            .params
-            .get("threadId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let turn_id = request
-            .params
-            .get("turnId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        if let Some(store) = self.conversations.read().await.clone() {
-            if let Err(error) =
-                store.append_server_request(&thread_id, &request.method, &request.params)
-            {
-                let _ = app.emit("codex://persistence-error", error);
-            }
-        }
-        self.emit_activity(app, &thread_id, json!({ "turnId": turn_id, "callId": call_id, "namespace": namespace, "tool": tool, "stage": "started", "arguments": arguments })).await;
-        if is_dangerous(&namespace, &tool) {
-            let diff = match self.describe_change(&namespace, &tool, &arguments).await {
-                Ok(diff) => diff,
-                Err(error) => {
-                    self.emit_activity(app, &thread_id, json!({ "turnId": turn_id, "callId": call_id, "namespace": namespace, "tool": tool, "stage": "completed", "success": false, "error": error.message })).await;
-                    let _ = write_tool_result(stdin, request.id, Err(error)).await;
-                    return;
-                }
-            };
-            let approval = PendingApproval {
-                id: call_id.clone(),
-                request_id: request.id,
-                thread_id,
-                turn_id,
-                namespace,
-                tool,
-                diff,
-                arguments,
-                connection_generation: self.generation.load(Ordering::SeqCst),
-                vault_root: self.vault_root.read().await.clone().unwrap_or_default(),
-            };
-            self.approvals
-                .lock()
-                .await
-                .insert(call_id, approval.clone());
-            if let Some(store) = self.conversations.read().await.clone() {
-                let _ = store.append_approval(
-                    &approval.thread_id,
-                    &approval.id,
-                    &approval.namespace,
-                    &approval.tool,
-                    &approval.diff,
-                    None,
-                );
-            }
-            let _ = app.emit(
-                "codex://event",
-                CodexEvent::TurnDiffUpdated {
-                    thread_id: approval.thread_id.clone(),
-                    turn_id: approval.turn_id.clone(),
-                    diff: approval.diff.clone(),
-                },
-            );
-            // 自动执行仍经过既有的路径校验、版本检查和变更记录。
-            if let Err(error) = self.resolve_approval(app, &approval.id, true).await {
-                let _ = app.emit("codex://persistence-error", error);
-            }
-        } else {
-            let diff = if is_write_tool(&namespace, &tool) {
-                self.describe_change(&namespace, &tool, &arguments)
-                    .await
-                    .ok()
-            } else {
-                None
-            };
-            if let Some(diff) = &diff {
-                let event = CodexEvent::TurnDiffUpdated {
-                    thread_id: thread_id.clone(),
-                    turn_id: turn_id.clone(),
-                    diff: diff.clone(),
-                };
-                if let Some(store) = self.conversations.read().await.clone() {
-                    let _ = store.append_event(&thread_id, &event);
-                }
-                let _ = app.emit("codex://event", event);
-            }
-            let before = if is_write_tool(&namespace, &tool) { self.change_snapshot(&namespace, &arguments).await } else { None };
-            let result = self.execute_tool(&namespace, &tool, &arguments).await;
-            self.finish_activity(app, &thread_id, &turn_id, &call_id, &namespace, &tool, &arguments, before, &result).await;
-            if let Some(store) = self.conversations.read().await.clone() {
-                let _ = store.append_tool_outcome(
-                    &thread_id,
-                    &call_id,
-                    &namespace,
-                    &tool,
-                    result.is_ok(),
-                );
-                if result.is_ok() {
-                    if let Some(diff) = &diff {
-                        let _ = store
-                            .append_change_summary(&thread_id, &call_id, &namespace, &tool, diff);
-                    }
-                }
-            }
-            if result.is_ok() {
-                emit_vault_change(app, &namespace, &tool, &arguments);
-            }
-            let _ = write_tool_result(stdin, request.id, result).await;
-        }
+    async fn set_status(&self, app: &AppHandle, status: CodexStatus) {
+        *self.status.write().await = status.clone();
+        let _ = app.emit("codex://status", status);
     }
 
     async fn emit_activity(&self, app: &AppHandle, thread_id: &str, data: Value) {
@@ -845,6 +345,9 @@ impl CodexRuntime {
         let content = if page.database_id.is_some() {
             format!("{}\n\n{}", page.content, serde_json::to_string_pretty(&page.properties).ok()?)
         } else { page.content };
+        let content = if arguments.get("sortOrder").is_some() {
+            format!("父页面：{}\n排序位置：{}\n\n{}", page.parent_id.as_deref().unwrap_or("根目录"), page.sort_order, content)
+        } else { content };
         Some(json!({ "pageId": page.id, "title": page.title, "content": content }))
     }
 
@@ -1031,30 +534,19 @@ impl CodexRuntime {
                 let database_id = record.database_id.clone().ok_or_else(|| {
                     AppError::new("database_record_not_found", "源页面不是数据库记录")
                 })?;
-                let expected: Option<Page> = if tool == "unlink" {
-                    Some(
-                        serde_json::from_value(arguments.get("expectedPage").cloned().ok_or_else(
-                            || AppError::new("tool_invalid_arguments", "缺少 expectedPage"),
-                        )?)
-                        .map_err(|error| {
-                            AppError::new("tool_invalid_arguments", error.to_string())
-                        })?,
-                    )
-                } else {
-                    None
-                };
-                let updated = if let Some(expected) = expected.as_ref() {
-                    repo.update_record_checked(
-                        &database_id,
-                        &record.id,
-                        record.title,
-                        properties,
-                        expected,
-                    )?
-                } else {
-                    repo.update_record(&database_id, &record.id, record.title, properties)?
-                };
+                let expected: Page = serde_json::from_value(
+                    arguments.get("expectedPage").cloned().ok_or_else(|| {
+                        AppError::new("tool_invalid_arguments", "缺少 expectedPage")
+                    })?,
+                ).map_err(|error| AppError::new("tool_invalid_arguments", error.to_string()))?;
+                let updated = repo.update_record_checked(
+                    &database_id, &record.id, record.title, properties, &expected,
+                )?;
                 serde_json::to_value(updated).unwrap()
+            }
+            ("database", "read") => {
+                let repo = DatabaseRepository::from_pages(pages.clone())?;
+                serde_json::to_value(repo.get(string("databaseId")?)?).unwrap()
             }
             ("database", "query") => {
                 let repo = DatabaseRepository::from_pages(pages.clone())?;
@@ -1247,27 +739,6 @@ impl CodexRuntime {
         }
     }
 
-    async fn resume_registered_threads(&self) {
-        let Some(store) = self.conversations.read().await.clone() else {
-            return;
-        };
-        if let Ok(ids) = store.registered_thread_ids() {
-            for id in ids {
-                let _ = self.resume_thread(&id, None).await;
-            }
-        }
-    }
-
-    async fn fail_pending(&self, message: &str) {
-        for (_, sender) in self.pending.lock().await.drain() {
-            let _ = sender.send(Err(AppError::new("codex_disconnected", message)));
-        }
-    }
-
-    async fn set_status(&self, app: &AppHandle, status: CodexStatus) {
-        *self.status.write().await = status.clone();
-        let _ = app.emit("codex://status", status);
-    }
 }
 
 fn is_dangerous(namespace: &str, tool: &str) -> bool {
@@ -1279,55 +750,37 @@ fn is_dangerous(namespace: &str, tool: &str) -> bool {
     )
 }
 
-fn attach_approval_baseline(
-    pages: &PageRepository,
+fn attach_read_baseline(
+    reads: &HashMap<String, Value>,
     namespace: &str,
     tool: &str,
     arguments: &mut Value,
 ) -> Result<(), AppError> {
-    let object = arguments
-        .as_object_mut()
-        .ok_or_else(|| AppError::new("tool_invalid_arguments", "工具参数必须是对象"))?;
-    let id = |key: &str| {
-        object
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| AppError::new("tool_invalid_arguments", format!("缺少参数 {key}")))
+    let (id_key, snapshot_key) = match (namespace, tool) {
+        ("page", "update") => ("id", ""),
+        ("page", "archive") | ("database", "update_record") => ("id", "expectedPage"),
+        ("relation", "link" | "unlink") => ("sourceId", "expectedPage"),
+        ("database", "update_schema") => ("databaseId", "expectedDefinition"),
+        _ => return Ok(()),
     };
-    match (namespace, tool) {
-        ("page", "update") => {
-            let current = pages.get(&id("id")?, false)?;
-            object.insert("expectedTitle".into(), json!(current.title));
-            object.insert("expectedContent".into(), json!(current.content));
+    let id = arguments.get(id_key).and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("tool_invalid_arguments", format!("缺少参数 {id_key}")))?;
+    let key = if snapshot_key == "expectedDefinition" { format!("database:{id}") } else { id.to_owned() };
+    let previous = reads.get(&key).ok_or_else(|| {
+        if snapshot_key == "expectedDefinition" {
+            AppError::new("database_read_required", "修改数据库结构前必须先调用 database_read")
+        } else {
+            AppError::new("page_read_required", "修改页面或记录前必须先调用 page_read 或 database_query")
         }
-        ("page", "archive") | ("database", "update_record") => {
-            let current = pages.get(&id("id")?, false)?;
-            object.insert(
-                "expectedPage".into(),
-                serde_json::to_value(current).unwrap(),
-            );
-        }
-        ("database", "update_schema") => {
-            let database_id = id("databaseId")?;
-            let definition = DatabaseRepository::from_pages(pages.clone())?.get(&database_id)?;
-            object.insert(
-                "expectedDefinition".into(),
-                serde_json::to_value(definition).unwrap(),
-            );
-        }
-        ("relation", "unlink") => {
-            let current = pages.get(&id("sourceId")?, false)?;
-            object.insert(
-                "expectedPage".into(),
-                serde_json::to_value(current).unwrap(),
-            );
-        }
-        _ => {}
+    })?;
+    if snapshot_key.is_empty() {
+        arguments["expectedTitle"] = previous["title"].clone();
+        arguments["expectedContent"] = previous["content"].clone();
+    } else {
+        arguments[snapshot_key] = previous.clone();
     }
     Ok(())
 }
-
 fn is_write_tool(namespace: &str, tool: &str) -> bool {
     matches!(
         (namespace, tool),
@@ -1340,6 +793,7 @@ fn is_write_tool(namespace: &str, tool: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn thread_start_params(cwd: &Path, scope_instruction: &str, model: Option<&str>, dynamic_tools: bool) -> Value {
     let mut params = json!({
         "cwd": cwd.to_string_lossy(), "approvalPolicy": "never", "sandbox": "read-only",
@@ -1364,6 +818,7 @@ fn thread_start_params(cwd: &Path, scope_instruction: &str, model: Option<&str>,
     params
 }
 
+#[cfg(test)]
 fn dynamic_tools_unavailable(error: &AppError) -> bool {
     let message = error.message.to_lowercase();
     message.contains("dynamictool")
@@ -1372,10 +827,12 @@ fn dynamic_tools_unavailable(error: &AppError) -> bool {
         || message.contains("unknown field")
 }
 
+#[cfg(test)]
 fn approval_matches(approval: &PendingApproval, generation: u64, vault_root: &str) -> bool {
     approval.connection_generation == generation && approval.vault_root == vault_root
 }
 
+#[cfg(test)]
 fn codex_app_server_args() -> [&'static str; 15] {
     [
         "-c",
@@ -1430,45 +887,6 @@ fn emit_vault_change(app: &AppHandle, namespace: &str, tool: &str, arguments: &V
             "databaseIds": database_ids
         }),
     );
-}
-
-async fn write_json(stdin: &Arc<Mutex<ChildStdin>>, value: &Value) -> Result<(), AppError> {
-    let mut bytes = serde_json::to_vec(value)
-        .map_err(|error| AppError::new("codex_invalid_request", error.to_string()))?;
-    bytes.push(b'\n');
-    let mut writer = stdin.lock().await;
-    writer
-        .write_all(&bytes)
-        .await
-        .map_err(|error| AppError::new("codex_write_failed", error.to_string()))?;
-    writer
-        .flush()
-        .await
-        .map_err(|error| AppError::new("codex_write_failed", error.to_string()))
-}
-
-async fn write_tool_result(
-    stdin: &Arc<Mutex<ChildStdin>>,
-    id: Value,
-    result: Result<Value, AppError>,
-) -> Result<(), AppError> {
-    let response = match result {
-        Ok(value) => rpc_response(
-            id,
-            Some(
-                json!({ "success": true, "contentItems": [{ "type": "inputText", "text": serde_json::to_string(&value).unwrap_or_default() }] }),
-            ),
-            None,
-        ),
-        Err(error) => rpc_response(
-            id,
-            Some(
-                json!({ "success": false, "contentItems": [{ "type": "inputText", "text": error.message }] }),
-            ),
-            None,
-        ),
-    };
-    write_json(stdin, &response).await
 }
 
 #[cfg(test)]
@@ -1618,10 +1036,18 @@ mod tests {
                 .execute_tool(
                     "relation",
                     "link",
-                    &json!({ "sourceId": source.id, "fieldId": relation.id, "targetId": target.id }),
+                    &json!({ "sourceId": source.id, "fieldId": relation.id, "targetId": target.id, "expectedPage": source }),
                 )
                 .await
                 .unwrap();
+            let stale = runtime
+                .execute_tool(
+                    "relation", "unlink",
+                    &json!({ "sourceId": source.id, "fieldId": relation.id, "targetId": target.id, "expectedPage": source }),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(stale.code, "approval_stale_data");
             let backlinks = runtime
                 .execute_tool("relation", "backlinks", &json!({ "id": target.id }))
                 .await
@@ -1673,9 +1099,16 @@ mod tests {
             let record = databases
                 .create_record(&database.id, "原记录".into(), BTreeMap::new())
                 .unwrap();
-            databases
-                .update_record(&database.id, &record.id, "用户修改".into(), BTreeMap::new())
+            let mut arguments = json!({ "id": record.id, "title": "Agent 修改", "properties": {} });
+            assert_eq!(
+                attach_read_baseline(&HashMap::new(), "database", "update_record", &mut arguments).unwrap_err().code,
+                "page_read_required"
+            );
+            let reads = HashMap::from([(record.id.clone(), json!(record))]);
+            pages
+                .update_checked(&record.id, record.title.clone(), "用户正文".into(), &record.title, &record.content)
                 .unwrap();
+            attach_read_baseline(&reads, "database", "update_record", &mut arguments).unwrap();
             let runtime = CodexRuntime::default();
             *runtime.pages.write().await = Some(pages.clone());
 
@@ -1683,18 +1116,13 @@ mod tests {
                 .execute_tool(
                     "database",
                     "update_record",
-                    &json!({
-                        "id": record.id,
-                        "title": "Agent 修改",
-                        "properties": {},
-                        "expectedPage": record
-                    }),
+                    &arguments,
                 )
                 .await
                 .unwrap_err();
 
             assert_eq!(error.code, "approval_stale_data");
-            assert_eq!(pages.get(&record.id, false).unwrap().title, "用户修改");
+            assert_eq!(pages.get(&record.id, false).unwrap().content, "用户正文");
             let _ = std::fs::remove_dir_all(root);
         });
     }

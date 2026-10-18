@@ -6,9 +6,10 @@ mod error;
 mod pages;
 mod portable;
 mod projection;
+mod safe_path;
 mod transfer;
 
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -106,12 +107,6 @@ pub fn run() {
         .manage(runtime)
         .manage(pages)
         .setup(move |app| {
-            let event_app = app.handle().clone();
-            if let Ok(watcher) = codex::config_watcher::CodexConfigWatcher::start(move || {
-                let _ = event_app.emit("codex://config-changed", ());
-            }) {
-                app.manage(watcher);
-            }
             let window_config = app
                 .config()
                 .app
@@ -144,6 +139,9 @@ pub fn run() {
             commands::codex::codex_stop,
             commands::codex::codex_restart,
             commands::codex::codex_models,
+            commands::codex::agent_settings_get,
+            commands::codex::agent_settings_save,
+            commands::codex::agent_test_connection,
             commands::pages::vault_init,
             commands::pages::page_list,
             commands::pages::page_get,
@@ -171,6 +169,7 @@ pub fn run() {
             commands::database::database_update_table_view,
             commands::conversations::conversation_create,
             commands::conversations::conversation_list,
+            commands::conversations::conversation_delete,
             commands::conversations::conversation_history,
             commands::conversations::conversation_send,
             commands::conversations::conversation_store_attachment,

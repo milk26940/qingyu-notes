@@ -17,7 +17,12 @@ import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { parseQingyuPageLink } from "../lib/internalLinks";
 import { useCodexStore } from "../stores/codexStore";
 import { useAgentStore } from "../stores/agentStore";
-import { useState } from "react";
+import { useAgentDraftStore } from "../stores/agentDraftStore";
+import { useWorkspaceStore } from "../stores/workspaceStore";
+import { useState, useRef } from "react";
+import { readSession, saveSession, useSessionStore } from "../stores/sessionStore";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import type { SidebarNav } from "../components/layout/Sidebar";
 import { DocumentOutline } from "../components/pages/DocumentOutline";
 import type { PageTab } from "../components/layout/WorkspaceShell";
@@ -32,10 +37,11 @@ function App() {
     targetBlockId,
     pages,
     vaultPath,
+    readyVaultPath,
     init,
     editDocument,
     editTitle,
-    createLinkedChild,
+    createEditorChild,
     save,
     open,
     error,
@@ -50,7 +56,16 @@ function App() {
   const initializeAgent = useAgentStore((state) => state.initialize);
   const [activeNav, setActiveNav] = useState<SidebarNav>("页面");
   const [tabs, setTabs] = useState<PageTab[]>([]);
-  const [selectedText, setSelectedText] = useState("");
+  const [restoredVault, setRestoredVault] = useState<string | null>(null);
+  const sessionSnapshot = useRef<() => void>(() => undefined);
+  const restoringVault = useRef<string | null>(null);
+  const activeConversationId = useAgentStore((state) => state.activeId);
+  useEffect(() => { useAgentDraftStore.getState().setTargetConversation(activeConversationId); }, [activeConversationId]);
+  useEffect(() => {
+    useAgentDraftStore.getState().clearReferences();
+    useAgentDraftStore.getState().setTargetConversation(null);
+    useAgentStore.setState({ activeId: null, records: [], conversations: [], queue: {}, queuePaused: {}, sending: false, error: null });
+  }, [vaultPath]);
   const [showLoading, setShowLoading] = useState(false);
   useEffect(() => {
     setShowLoading(false);
@@ -74,7 +89,8 @@ function App() {
     setActiveNav("页面");
     void open(id, blockId);
   }, [open]);
-  const closeTabs = (ids: string[]) => {
+  const closeTabs = async (ids: string[]) => {
+    if (!(await usePagesStore.getState().flush())) return;
     const closing = new Set(ids);
     setTabs((current) => {
       const activeIndex = current.findIndex(
@@ -113,9 +129,76 @@ function App() {
       if (firstPage) void open(firstPage.id);
     }
   };
+  useEffect(() => { void init(); }, [init]);
   useEffect(() => {
-    void init();
-  }, [init]);
+    if (!vaultPath || readyVaultPath !== vaultPath || restoredVault === vaultPath || restoringVault.current === vaultPath) return;
+    restoringVault.current = vaultPath;
+    const saved = readSession(vaultPath);
+    useSessionStore.getState().bind(vaultPath);
+    const existing = new Map(pages.map((page) => [page.id, page]));
+    setTabs((saved.tabs ?? []).filter((tab) => existing.has(tab.pageId)).map((tab) => ({ ...tab, title: existing.get(tab.pageId)!.title })));
+    const workspace = useWorkspaceStore.getState();
+    useWorkspaceStore.setState({ sidebarOpen: saved.sidebarOpen ?? workspace.sidebarOpen, agentPanelOpen: saved.agentPanelOpen ?? workspace.agentPanelOpen });
+    if (saved.sidebarWidth) workspace.setSidebarWidth(saved.sidebarWidth);
+    if (saved.agentPanelWidth) workspace.setAgentPanelWidth(saved.agentPanelWidth);
+    if (saved.fontScale) useAppearanceStore.getState().setFontScale(saved.fontScale);
+    const restorePage = saved.activePageId && existing.has(saved.activePageId) ? open(saved.activePageId) : Promise.resolve();
+    void restorePage.finally(() => { if (usePagesStore.getState().vaultPath === vaultPath) setRestoredVault(vaultPath); restoringVault.current = null; });
+    if (saved.window && saved.window.width > 0 && saved.window.height > 0 && "__TAURI_INTERNALS__" in window) {
+      const view = getCurrentWindow();
+      // 忽略旧版本记录的零尺寸，恢复时遵守主窗口最小尺寸。
+      void view.setSize(new LogicalSize(Math.max(960, saved.window.width), Math.max(640, saved.window.height))).then(() => saved.window?.maximized ? view.maximize() : undefined).catch(() => undefined);
+    }
+  }, [vaultPath, readyVaultPath, pages, restoredVault, open]);
+  useEffect(() => {
+    if (!vaultPath || restoredVault !== vaultPath) return;
+    const snapshot = () => {
+      if (usePagesStore.getState().vaultPath !== vaultPath || usePagesStore.getState().readyVaultPath !== vaultPath) return;
+      const view = useWorkspaceStore.getState();
+      saveSession(vaultPath, { tabs, activePageId: usePagesStore.getState().activePage?.id ?? null, sidebarOpen: view.sidebarOpen, sidebarWidth: view.sidebarWidth, agentPanelOpen: view.agentPanelOpen, agentPanelWidth: view.agentPanelWidth, fontScale: useAppearanceStore.getState().fontScale });
+    };
+    sessionSnapshot.current = snapshot;
+    snapshot();
+    const offWorkspace = useWorkspaceStore.subscribe(snapshot);
+    const offAppearance = useAppearanceStore.subscribe(snapshot);
+    return () => { offWorkspace(); offAppearance(); };
+  }, [tabs, activePage?.id, vaultPath, restoredVault]);
+  useEffect(() => {
+    if (!vaultPath || restoredVault !== vaultPath || !("__TAURI_INTERNALS__" in window)) return;
+    const view = getCurrentWindow();
+    let disposed = false, closing = false;
+    let offClose: (() => void) | undefined, offResize: (() => void) | undefined;
+    let normal = readSession(vaultPath).window;
+    const rememberWindow = async () => {
+      // 最小化时内容区为零，不能覆盖上次正常窗口大小。
+      if (await view.isMinimized()) return;
+      const maximized = await view.isMaximized();
+      if (!maximized) {
+        const size = await view.innerSize(); const scale = await view.scaleFactor();
+        if (size.width <= 0 || size.height <= 0) return;
+        normal = { width: size.width / scale, height: size.height / scale, maximized };
+      }
+      if (normal) saveSession(vaultPath, { window: { ...normal, maximized } });
+    };
+    void rememberWindow();
+    void view.onResized(() => { void rememberWindow(); }).then((off) => { if (disposed) off(); else offResize = off; });
+    void view.onCloseRequested((event) => {
+      event.preventDefault();
+      if (closing) return;
+      closing = true;
+      void (async () => {
+        window.dispatchEvent(new Event("qingyu:remember-position"));
+        sessionSnapshot.current();
+        await rememberWindow();
+        if (!(await usePagesStore.getState().flush())) {
+          usePagesStore.getState().reportError("关闭前未能保存正文，请先处理保存错误或版本冲突，再关闭窗口。");
+          closing = false; return;
+        }
+        await view.destroy();
+      })().catch((failure) => { closing = false; usePagesStore.getState().reportError(String(failure)); });
+    }).then((off) => { if (disposed) off(); else offClose = off; });
+    return () => { disposed = true; offClose?.(); offResize?.(); };
+  }, [vaultPath, restoredVault]);
   useEffect(() => {
     const handleSave = (event: KeyboardEvent) => {
       if (event.isComposing) return;
@@ -244,12 +327,8 @@ function App() {
       unlisten?.();
     };
   }, [vaultPath]);
-  const clearSelectedText = useCallback(() => setSelectedText(""), []);
   const rightPanel = (
-    <Suspense fallback={<aside aria-label="Agent 面板" className="grid h-full w-full place-items-center rounded-[22px] bg-[var(--qy-sidebar)] text-sm text-[var(--qy-faint)]">加载 Agent…</aside>}><AgentPanel
-      selectedText={selectedText}
-      onClearSelection={clearSelectedText}
-    /></Suspense>
+    <Suspense fallback={<aside aria-label="Agent 面板" className="grid h-full w-full place-items-center rounded-[22px] bg-[var(--qy-sidebar)] text-sm text-[var(--qy-faint)]">加载 Agent…</aside>}><AgentPanel /></Suspense>
   );
   return (
     <WorkspaceShell
@@ -319,8 +398,8 @@ function App() {
                 pages={pages}
                 targetBlockId={targetBlockId}
                 onChange={editDocument}
-                onSelectionAction={setSelectedText}
-                onCreateChild={createLinkedChild}
+                onSelectionAction={(reference) => { useAgentDraftStore.getState().addReferences([reference]); if (!useWorkspaceStore.getState().agentPanelOpen) useWorkspaceStore.getState().toggleAgentPanel(); }}
+                onCreateChild={createEditorChild}
                 onOpenPage={openPage}
                 pageKind={activePage.kind}
               />}

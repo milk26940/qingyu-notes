@@ -18,7 +18,7 @@ type CodexStore = {
   models: CodexModelOption[];
   modelsLoading: boolean;
   modelsError: string | null;
-  loadModels: () => Promise<void>;
+  loadModels: () => Promise<boolean>;
   connect: () => Promise<void>;
   restart: () => Promise<void>;
   disconnect: () => Promise<void>;
@@ -32,6 +32,8 @@ const asError = (error: unknown): CodexError => {
   return { code: "codex_unknown_error", message: String(error) };
 };
 
+let modelLoadSequence = 0;
+
 export const useCodexStore = create<CodexStore>((set, get) => ({
   status: { state: "stopped" },
   restartRequired: false,
@@ -39,20 +41,25 @@ export const useCodexStore = create<CodexStore>((set, get) => ({
   modelsLoading: false,
   modelsError: null,
   loadModels: async () => {
+    const sequence = ++modelLoadSequence;
     set({ modelsLoading: true, modelsError: null });
     try {
       const models = await listCodexModels();
+      if (sequence !== modelLoadSequence) return false;
       set({ models, modelsLoading: false, modelsError: null });
+      return true;
     } catch (error) {
+      if (sequence !== modelLoadSequence) return false;
       const failure = asError(error);
       set({ modelsLoading: false, modelsError: failure.message });
+      return false;
     }
   },
   connect: async () => {
     set({ status: { state: "starting" } });
     try {
       const status = await startCodex();
-      set({ status });
+      set({ status, restartRequired: false });
       if (status.state === "ready") {
         void get().loadModels();
       }
@@ -94,7 +101,8 @@ export const useCodexStore = create<CodexStore>((set, get) => ({
       }
     });
     const unlistenConfig = await subscribeCodexConfigChanges(() => {
-      set({ restartRequired: true });
+      // 内置运行时在下一次请求时读取新设置，无需重启外部进程。
+      set({ restartRequired: false });
       void get().loadModels();
     });
     return () => { unlistenStatus(); unlistenConfig(); };
